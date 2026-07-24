@@ -1,0 +1,4 @@
+garminconnect>=0.3.6
+requests>=2.32
+python-dotenv>=1.0
+PyYAML>=6.0

@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/__init__.py
+src/config.py
+src/daily.py
+src/garmin.py
+src/llm.py
+src/notify.py
+src/prompt.py
+src/store.py
+src/weekly.py
+src/montanha_coach.egg-info/PKG-INFO
+src/montanha_coach.egg-info/SOURCES.txt
+src/montanha_coach.egg-info/dependency_links.txt
+src/montanha_coach.egg-info/requires.txt
+src/montanha_coach.egg-info/top_level.txt

@@ -1,0 +1,23 @@
+# Non-secret settings. Secrets live in .env.
+
+timezone: "Europe/Lisbon"        # <-- set to your timezone
+
+model:
+  # CONFIRM the exact tag on ollama.com/library before first run.
+  # Primary (best quality that fits 48 GB): Q8. Fallback if memory is tight: q6_k.
+  name: "qwen3.6:35b"
+  host: "http://localhost:11434"
+  think: true                    # thinking / reasoning mode (verify option name for your Ollama version)
+  temperature: 0.4
+  timeout_seconds: 900           # generous: it runs while you sleep
+
+context_days: 14                 # how many days of history the daily prompt includes
+
+delivery:
+  telegram: true
+  email: false                   # set true and fill SMTP_* in .env to also email the weekly review
+
+paths:
+  db: "data/coach.db"
+  principles: "data/coach_principles.md"
+  plan: "data/plan.json"

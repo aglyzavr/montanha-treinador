@@ -1,0 +1,17 @@
+[project]
+name = "montanha-coach"
+version = "0.1.0"
+description = "Private, local-first AI training coach driven by Garmin data."
+requires-python = ">=3.12"
+dependencies = [
+    "garminconnect>=0.3.6",
+    "requests>=2.32",
+    "python-dotenv>=1.0",
+    "PyYAML>=6.0",
+]
+
+# Install (from the project root):
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -e .
+# or with uv:
+#   uv venv && source .venv/bin/activate && uv pip install -e .

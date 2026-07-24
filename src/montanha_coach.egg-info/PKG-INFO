@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: montanha-coach
+Version: 0.1.0
+Summary: Private, local-first AI training coach driven by Garmin data.
+Requires-Python: >=3.12
+Requires-Dist: garminconnect>=0.3.6
+Requires-Dist: requests>=2.32
+Requires-Dist: python-dotenv>=1.0
+Requires-Dist: PyYAML>=6.0
