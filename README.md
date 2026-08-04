@@ -97,19 +97,45 @@ You should get a Telegram message.
   decision rules from your book (dense, imperative; this becomes the coach's judgment).
 - Edit `data/plan.json` — put in your real current plan.
 
-### 7. First real run
+### 7. Backfill your history (one time)
 
 ```bash
 source .venv/bin/activate
+python scripts/backfill.py --reparse          # no network: re-extracts vert,
+                                              # HR zones, cadence, temperature
+                                              # etc. from payloads already saved
+python scripts/backfill.py --fetch 60 --scores  # recovers days a missed run lost
+```
+
+`--reparse` is free and instant — every new metric was already sitting in the
+stored `raw_json` and simply wasn't extracted.
+
+### 8. First real run
+
+```bash
 python -m src.daily
+python -m src.weekly --dry-run   # prints the prompt without calling the model
+python -m src.weekly
 ```
 
 This fetches Garmin → reasons → sends today's recommendation to Telegram, and
-saves everything to `data/coach.db`. Run the weekly review manually any time with:
+saves everything to `data/coach.db`.
 
-```bash
-python -m src.weekly
+### 9. Log what Garmin can't see
+
+Strength sessions, foot condition and soreness aren't in any Garmin payload.
+Reply to the bot in Telegram and the next run picks it up:
+
 ```
+s: back squat 5x5 @85kg          → strength session
+feet: hotspot left heel, taped   → foot durability log
+sore 3                           → soreness 1-5
+rpe 7                            → session RPE
+2026-08-01 s: deadlifts          → backdate anything
+```
+
+Without these the coach reports them as unknown rather than assuming the work
+was done.
 
 ---
 
@@ -142,15 +168,25 @@ Keep the Mac plugged in overnight. Logs go to `logs/`. To stop a job:
 
 ```
 src/garmin.py   Garmin fetch + normalize   (the only fragile part — isolated)
-src/store.py    SQLite memory
-src/prompt.py   builds the daily / weekly prompts from principles + plan + data
+src/store.py    SQLite memory + additive migrations
+src/plan.py     resolves date -> phase, week, km/vert target (deterministic)
+src/metrics.py  computes the weekly numbers (deterministic)
+src/inbox.py    ingests your Telegram replies (strength / feet / soreness)
+src/prompt.py   builds the daily / weekly prompts from the above
 src/llm.py      Ollama call (thinking mode) + output parsing
 src/notify.py   Telegram / email delivery
-src/daily.py    morning job  ->  python -m src.daily
-src/weekly.py   Sunday job   ->  python -m src.weekly
-scripts/        one-time Garmin login + launchd plist templates
+src/daily.py    morning job  ->  python -m src.daily        (06:30 daily)
+src/weekly.py   weekly job   ->  python -m src.weekly       (07:30 Mondays)
+scripts/        Garmin login, backfill, launchd plist templates
 data/           coach_principles.md, plan.json, coach.db
 ```
+
+**Division of labour.** `plan.py` and `metrics.py` do all arithmetic and
+calendar logic in Python; the model receives finished figures and spends its
+reasoning on judgement alone. It is instructed never to compute its own totals.
+
+**The weekly window** is always the last *complete* Monday–Sunday. Run it on
+any day of the week and you get the same answer for that week.
 
 ## Troubleshooting
 

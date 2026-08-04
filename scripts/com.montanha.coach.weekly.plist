@@ -1,7 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Weekly review, Sundays at 07:00. Weekday 0 = Sunday.
+  Weekly review, MONDAYS at 07:30. Weekday 1 = Monday.
+
+  It runs on Monday, not Sunday, so it reviews a week that has actually
+  finished. A Sunday 07:00 run reviewed a week whose Sunday had not happened
+  yet, and whose Saturday long run had only just landed in the database --
+  which is why Sunday training never appeared in the review.
+
+  07:30 is deliberately after the 06:30 daily job, so Sunday's activities have
+  been fetched and backfilled before the week is summed.
+
   Replace __PROJECT_DIR__ with the absolute path to montanha-coach.
   Install:
     cp scripts/com.montanha.coach.weekly.plist ~/Library/LaunchAgents/
@@ -20,11 +29,11 @@
     <key>StartCalendarInterval</key>
     <dict>
         <key>Weekday</key>
-        <integer>0</integer>
+        <integer>1</integer>
         <key>Hour</key>
         <integer>7</integer>
         <key>Minute</key>
-        <integer>0</integer>
+        <integer>30</integer>
     </dict>
     <key>StandardOutPath</key>
     <string>__PROJECT_DIR__/logs/launchd.out.log</string>
