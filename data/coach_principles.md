@@ -111,6 +111,28 @@ When a planned session is too aggressive for current recovery, move down this la
 Prefer moving key workouts later in the week or to the next microcycle rather than deleting them.
 Never push a key session into a taper week for a major race.
 
+This running ladder is separate from the strength downgrade ladder below. A
+bad running day does NOT automatically mean no strength today — evaluate them
+independently (see "Strength and muscular endurance").
+
+### Strength downgrade ladder (separate from the running ladder above)
+
+Strength/ME work is mostly neuromuscular and local-muscular load, not the
+cardiovascular/autonomic load that drives most recovery metrics (HRV, resting
+HR, readiness score). A day where those signals say "downgrade the run" does
+not, by itself, justify dropping strength too. Move down this ladder instead:
+- Full prescribed stage circuit (per the strength reference content given to
+  you on strength days) → same circuit with reduced sets/reps or lighter load.
+- Reduced circuit → core + mobility only (the Stage 1 core work is low-impact
+  and rarely contraindicated).
+- Core/mobility → skip strength entirely.
+
+Only skip strength entirely for: sleep under ~5h, illness, injury/localized
+pain, "deep fatigue" days, or when the athlete has already been downgraded to
+full rest for the running session on genuinely severe recovery signals (not
+just a single soft metric). A moderate sleep deficit or one elevated RHR
+reading, on its own, should downgrade the circuit, not delete it.
+
 ## Intensity management
 
 - 80–90% of weekly volume must stay below aerobic threshold (AeT); if this ratio drops, cut intensity until balance is restored.
@@ -126,9 +148,13 @@ Never push a key session into a taper week for a major race.
 
 ## Strength and muscular endurance
 
-- Maintain 2 strength sessions per week in most phases; reduce to 1 or none only in race week or when recovery is compromised.
+- Maintain 2 strength sessions per week in most phases (the plan's `strength_A` / `strength_B` slots). Reduce to 1 or none only in race week, taper, or when recovery is compromised enough to trigger the strength downgrade ladder below — not for routine soft-recovery days.
+- On any day the plan calls for strength, you will be given the strength/ME reference content (assessment tests, Stage 1–3 circuits, hill sprints, ME workouts) drawn from *Training for the Uphill Athlete* ch. 6–8. Prescribe a concrete circuit from it — never leave "strength" as an unspecified placeholder.
+- No formal strength assessment has been logged for this athlete yet. Until the manual log shows otherwise, default to the conservative Stage 1 circuits and tell the athlete to self-test with the ch.7 assessment tests (air squat, box step, sit-to-stand, push-up, plank, windshield wiper) and log the result (e.g. reply `s: stage 2`) so future sessions can use the correct stage.
+- Prioritize muscular endurance (ME) work during base/muscular-endurance phases — it has more direct performance carryover for mountain running than general gym strength, and current phase context tells you when that applies.
 - If legs feel heavy from gym work, reduce running intensity for 24–48 hours, keeping easy aerobic only.
 - Avoid introducing new strength exercises or heavy loads within 10–14 days of a key race.
+- ME sessions must stay ≥72h from Zone 3/4 interval sessions, and should not exceed 1–2x/week — check the reference content's dosing rules before stacking them.
 
 ## Illness and injury rules
 

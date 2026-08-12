@@ -74,8 +74,17 @@ def run(today: date = None):
     notes = db.notes_between((today - timedelta(days=7)).isoformat(), today.isoformat())
     ctx = planmod.resolve(plan_doc, today)
 
+    strength_reference = None
+    sref_path = cfg["paths"].get("strength_reference")
+    if sref_path:
+        try:
+            strength_reference = prompt.load_strength_reference(project_path(sref_path))
+        except FileNotFoundError:
+            strength_reference = None
+
     system, user = prompt.build_daily(principles, plan_doc, m_today, yest_acts,
-                                      recent, today=today, notes=notes)
+                                      recent, today=today, notes=notes,
+                                      strength_reference=strength_reference)
 
     try:
         text = llm.chat(cfg, system, user)

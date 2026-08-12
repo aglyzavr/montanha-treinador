@@ -21,3 +21,4 @@ paths:
   db: "data/coach.db"
   principles: "data/coach_principles.md"
   plan: "data/plan.json"
+  strength_reference: "data/strength_reference_uphill_athlete.md"

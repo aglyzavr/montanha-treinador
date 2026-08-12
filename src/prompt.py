@@ -16,6 +16,25 @@ def load_principles(path: str) -> str:
         return f.read().strip()
 
 
+def load_strength_reference(path: str) -> str:
+    """The ch.6-8 strength/ME content (data/strength_reference_uphill_athlete.md).
+
+    Only injected into the prompt on days the plan actually calls for strength
+    (see `_plans_strength`). Without this the model was given a bare label
+    like "easy_run_plus_strength_A" with no exercises behind it -- it had
+    nothing concrete to prescribe.
+    """
+    with open(path, "r") as f:
+        return f.read().strip()
+
+
+def _plans_strength(planned: dict) -> bool:
+    if not planned:
+        return False
+    blob = f"{planned.get('type', '')} {planned.get('description', '')}".lower()
+    return "strength" in blob
+
+
 def load_plan(path: str) -> dict:
     return planmod.load(path)
 
@@ -33,6 +52,10 @@ FLAGS: <comma-separated notable signals, or "none">
 Rules:
 - Use ONLY the figures given. Never estimate a total that was not provided.
 - If a value is marked unknown or missing, say so; do not fill the gap.
+- If the user prompt contains a "TODAY'S PLAN CALLS FOR A STRENGTH SESSION"
+  block, follow its formatting instructions for how to write out the strength
+  portion of the message -- never just name a stage without listing what it
+  consists of.
 """
 
 
@@ -119,7 +142,7 @@ def _fmt_trend(recent: list) -> str:
 
 
 def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
-                recent, today=None, notes=None):
+                recent, today=None, notes=None, strength_reference=None):
     today = today or date.today()
     ctx = planmod.resolve(plan_doc, today)
     system = principles + "\n\n---\n" + OUTPUT_CONTRACT
@@ -127,6 +150,23 @@ def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
     planned = ctx.get("planned_today")
     note_lines = "\n".join(f"  {n['date']} [{n['kind']}] {n['text']}"
                            for n in (notes or [])) or "  (none logged)"
+
+    strength_block = ""
+    if strength_reference and _plans_strength(planned):
+        stage_notes = [n for n in (notes or []) if n.get("kind") == "strength"]
+        stage_hint = ("No strength sessions logged yet in the manual log -- "
+                       "default to the Stage 1 circuits and tell the athlete "
+                       "to self-test using the assessment tests below, then "
+                       "log the result (e.g. reply `s: stage 2`) so future "
+                       "sessions can use the right stage.") if not stage_notes \
+            else ("Check the manual log above for the athlete's last logged "
+                  "stage/exercises before picking today's circuit.")
+        strength_block = f"""
+
+TODAY'S PLAN CALLS FOR A STRENGTH SESSION -- REFERENCE CONTENT
+(use this to prescribe an actual circuit, not a placeholder; {stage_hint})
+{strength_reference}
+"""
 
     user = f"""Today is {today.isoformat()} ({today.strftime('%A')}).
 
@@ -145,9 +185,12 @@ RECENT TREND
 
 RECENT MANUAL LOG (strength / feet / soreness)
 {note_lines}
-
+{strength_block}
 Decide today's session. When signals conflict or data is missing, choose the
-easier option. Reference the specific numbers above in your reasoning.
+easier option. Strength/ME work is a different stimulus from running load
+(mostly neuromuscular/local, not cardiovascular) -- follow the strength
+downgrade rules in your principles rather than dropping it whenever running
+gets downgraded. Reference the specific numbers above in your reasoning.
 """
     return system, user
 
