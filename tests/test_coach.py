@@ -26,7 +26,7 @@ if "garminconnect" not in sys.modules:
     _m.Garmin = object
     sys.modules["garminconnect"] = _m
 
-from src import inbox, llm, metrics, notify, plan as P  # noqa: E402
+from src import inbox, llm, metrics, notify, plan as P, prompt  # noqa: E402
 
 PLAN = P.load(str(ROOT / "data" / "plan.json"))
 
@@ -243,6 +243,131 @@ def test_telegram_messages_are_split_under_the_limit():
     assert len(notify._chunks("x" * 4096)) == 1
     assert all(len(p) <= 4096 for p in notify._chunks("x" * 10000))
     assert all(len(p) <= 4096 for p in notify._chunks("para\n\n" * 2000))
+
+
+# --------------------------------------------------------------------------
+# The missing session: "execute the long run as planned" with no numbers
+#
+# plan.json held 180 min / 1100 m / "add 20 min technical descent" the whole
+# time. Nothing in the prompt required the model to write any of it down, so
+# the athlete got a message that pointed back at the plan instead of
+# prescribing a session. These lock the numbers into the prompt.
+# --------------------------------------------------------------------------
+
+def _runs(n=12, speed=8.0, density=30.0, hours=1.5, spread=True):
+    """Synthetic history. Varied by default: a real athlete's runs are not all
+    identical, and the estimator matches on vertical density."""
+    out = []
+    for i in range(n):
+        f = (1 + 0.6 * (i % 5) if spread else 1.0)      # densities 1x .. 3.4x
+        km = speed * hours
+        out.append({"type": "trail_running", "duration_min": hours * 60,
+                    "distance_km": km, "elevation_gain_m": km * density * f})
+    return out
+
+
+def test_long_run_day_carries_duration_vert_and_focus():
+    ctx = P.resolve(PLAN, date(2026, 8, 15))       # A3 week 2, Saturday
+    block = prompt.build_prescription(ctx, _runs())
+    assert "180 min" in block
+    assert "1100 m" in block
+    assert "Add 20 min technical descent" in block
+
+
+def test_prescription_gives_bpm_not_zone_labels():
+    """Zone labels are not actionable in a Telegram message; bpm is.
+
+    The figures are read out of the plan rather than hardcoded -- AeT and LT
+    get retested, and a test that asserts last season's numbers would start
+    failing for the one reason that is not a bug.
+    """
+    ctx = P.resolve(PLAN, date(2026, 8, 15))       # A3 week 2, Saturday
+    z = ctx["hr_zones"]
+    block = prompt.build_prescription(ctx, _runs())
+    assert f"below {z['z2_upper_aerobic_bpm'][0]} bpm" in block
+    assert f"hard ceiling {z['z2_upper_aerobic_bpm'][1]} bpm" in block
+    assert f"Z3 starts at {z['z3_sub_threshold_bpm'][0]} bpm" in block
+
+
+def test_threshold_day_gets_threshold_bpm_not_easy_bpm():
+    ctx = P.resolve(PLAN, date(2026, 8, 20))       # Thursday: Z3->Z4 intervals
+    z = ctx["hr_zones"]
+    block = prompt.build_prescription(ctx, _runs())
+    assert f"work reps {z['z3_sub_threshold_bpm'][0]}-{z['z3_sub_threshold_bpm'][1]} bpm" in block
+    assert f"top end {z['z4_near_lt_bpm'][0]}-{z['z4_near_lt_bpm'][1]} bpm" in block
+    assert f"recoveries below {z['z1_easy_aerobic_bpm'][1]} bpm" in block
+    assert "hard ceiling" not in block             # i.e. not the easy-day line
+
+
+def test_distance_stated_by_the_plan_is_used_verbatim():
+    ctx = P.resolve(PLAN, date(2026, 8, 18))       # Tuesday club run "12-14km"
+    block = prompt.build_prescription(ctx, _runs())
+    assert "PRESCRIBED DISTANCE: 12-14 km" in block
+    assert "ESTIMATE" not in block
+
+
+def test_estimated_distance_is_labelled_an_estimate():
+    ctx = P.resolve(PLAN, date(2026, 8, 15))
+    block = prompt.build_prescription(ctx, _runs())
+    assert "ESTIMATE ONLY" in block
+    assert "never as a target" in block
+
+
+def test_estimate_is_withheld_when_history_is_thin():
+    assert prompt.estimate_distance_km(180, 1100, []) is None
+    assert prompt.estimate_distance_km(180, 1100, _runs(n=4)) is None
+    assert prompt.estimate_distance_km(180, 1100, _runs(n=20, hours=0.5)) is None  # all too short
+    assert prompt.estimate_distance_km(180, 1100, _runs(n=20, hours=1.5,
+                                                        density=5.0)) is None  # all flat
+
+
+def test_estimate_scales_with_time():
+    hist = _runs(n=20)
+    long_ = prompt.estimate_distance_km(180, 900, hist)
+    short = prompt.estimate_distance_km(90, 450, hist)
+    assert long_ and short
+    assert short[1] < long_[1]         # less time, fewer km
+    assert long_[0] < long_[1]
+
+
+def test_estimate_is_withheld_at_a_steepness_never_trained():
+    """Flat-run pace must not be quietly reused for a climb they have never done."""
+    flat_history = _runs(n=20, density=20.0, spread=False)
+    assert prompt.estimate_distance_km(180, 3000, flat_history) is None
+
+
+def test_estimate_fades_rather_than_extrapolating_pace():
+    """A 4h run must not be predicted at the pace of the athlete's 1.5h runs."""
+    hist = _runs(n=20, speed=8.0, hours=1.5, density=30.0)
+    est = prompt.estimate_distance_km(240, 720, hist)
+    assert est and est[1] < 8.0 * 4    # below naive speed x time
+
+
+def test_rest_days_get_no_prescription_block():
+    assert prompt.build_prescription(P.resolve(PLAN, date(2026, 8, 17)), _runs()) == ""
+    assert prompt.build_prescription(P.resolve(PLAN, date(2035, 1, 1)), _runs()) == ""
+
+
+def test_contract_forbids_answering_with_as_planned():
+    assert "as planned" in prompt.OUTPUT_CONTRACT
+    assert "FORBIDDEN" in prompt.OUTPUT_CONTRACT
+    assert "Today's session:" in prompt.OUTPUT_CONTRACT
+
+
+def test_daily_prompt_actually_contains_the_numbers():
+    system, user = prompt.build_daily(
+        "principles", PLAN, {}, [], [], today=date(2026, 8, 15),
+        activity_history=_runs())
+    assert "PRESCRIBED DURATION: 180 min" in user
+    assert "1100 m D+" in user
+    assert "Never write \"as planned\"" in system
+
+
+def test_build_daily_works_without_history():
+    """The estimate is optional; its absence must not break the daily job."""
+    _, user = prompt.build_daily("p", PLAN, {}, [], [], today=date(2026, 8, 15))
+    assert "PRESCRIBED DURATION: 180 min" in user
+    assert "not enough" in user
 
 
 if __name__ == "__main__":

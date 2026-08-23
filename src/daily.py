@@ -15,6 +15,7 @@ from .config import CONFIG, project_path
 from . import garmin, store, prompt, llm, notify, plan as planmod, inbox
 
 BACKFILL_DAYS = 10
+HISTORY_DAYS = 60   # lookback for the pace/vert-density distance estimate
 
 
 def run(today: date = None):
@@ -74,6 +75,13 @@ def run(today: date = None):
     notes = db.notes_between((today - timedelta(days=7)).isoformat(), today.isoformat())
     ctx = planmod.resolve(plan_doc, today)
 
+    # Feeds the distance estimate only. The plan prescribes long runs in time
+    # and vert; how many km that comes to depends on this athlete's own pace at
+    # this athlete's own vert density, so it is derived from their history and
+    # labelled an estimate rather than guessed by the model.
+    history = db.activities_between(
+        (today - timedelta(days=HISTORY_DAYS)).isoformat(), yesterday.isoformat())
+
     strength_reference = None
     sref_path = cfg["paths"].get("strength_reference")
     if sref_path:
@@ -84,7 +92,8 @@ def run(today: date = None):
 
     system, user = prompt.build_daily(principles, plan_doc, m_today, yest_acts,
                                       recent, today=today, notes=notes,
-                                      strength_reference=strength_reference)
+                                      strength_reference=strength_reference,
+                                      activity_history=history)
 
     try:
         text = llm.chat(cfg, system, user)

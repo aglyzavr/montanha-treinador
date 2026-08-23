@@ -5,7 +5,9 @@ should spend its reasoning on judgement, never on summing activity rows or
 working out which training week it is.
 """
 import json
+import re
 from datetime import date
+from statistics import median
 
 from . import plan as planmod
 from . import metrics as metricsmod
@@ -39,11 +41,295 @@ def load_plan(path: str) -> dict:
     return planmod.load(path)
 
 
+# --------------------------------------------------------------------------
+# Today's running prescription, resolved in Python.
+#
+# The strength path already had this: on strength days the model is handed the
+# actual circuit and told it may not answer with a bare stage name. The running
+# path had no equivalent, so a day whose plan says {"type": "long_run",
+# "description": "Highest volume day"} produced messages like "Execute the full
+# long run as planned" -- technically obedient, useless to run by. The duration,
+# vert and focus were sitting in `long_run_progression_A3` the whole time; the
+# model was just never required to write them out.
+#
+# Same principle as plan.py: resolve the numbers here, hand the model finished
+# figures, and let it spend its reasoning on whether to downgrade them.
+# --------------------------------------------------------------------------
+
+# "12-14km", "12–14 km", "≈45 min", "20–30 min" as written in
+# weekly_day_pattern_default descriptions.
+_KM_RANGE = re.compile(r"(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*km", re.I)
+_KM_ONE = re.compile(r"[≈~]?\s*(\d+(?:[.,]\d+)?)\s*km", re.I)
+_MIN_RANGE = re.compile(r"(\d+)\s*[-–—]\s*(\d+)\s*min", re.I)
+_MIN_ONE = re.compile(r"[≈~]?\s*(\d+)\s*min", re.I)
+
+
+def _num(s):
+    return float(str(s).replace(",", "."))
+
+
+def _stated(description: str):
+    """Distance/duration the plan states in prose, e.g. "12-14km, 300-400m vert".
+
+    Only what is literally written. Nothing inferred.
+    """
+    out = {"km": None, "duration_min": None}
+    if not description:
+        return out
+    m = _KM_RANGE.search(description)
+    if m:
+        out["km"] = (_num(m.group(1)), _num(m.group(2)))
+    else:
+        m = _KM_ONE.search(description)
+        if m:
+            out["km"] = (_num(m.group(1)), _num(m.group(1)))
+    m = _MIN_RANGE.search(description)
+    if m:
+        out["duration_min"] = (int(m.group(1)), int(m.group(2)))
+    else:
+        m = _MIN_ONE.search(description)
+        if m:
+            out["duration_min"] = (int(m.group(1)), int(m.group(1)))
+    return out
+
+
+def _run_history(activity_history, min_duration_min=50):
+    """Past runs reduced to (speed_kmh, vert_per_km, hours). Walks excluded."""
+    out = []
+    for a in activity_history or []:
+        if "running" not in str(a.get("type") or "").lower():
+            continue
+        dur = a.get("duration_min") or 0
+        km = a.get("distance_km") or 0
+        if dur < min_duration_min or km <= 0:
+            continue
+        hours = dur / 60.0
+        out.append((km / hours, (a.get("elevation_gain_m") or 0) / km, hours))
+    return out
+
+
+DENSITY_BANDS = [(0.75, 1.35), (0.6, 1.6), (0.5, 2.0)]  # widened until 4 peers
+MIN_PEERS = 4
+FADE_PER_HOUR = 0.09          # speed lost per hour beyond the peer set's median
+FADE_FLOOR = 0.75
+SPREAD = 0.10                 # +/- band around the central figure
+
+
+def estimate_distance_km(duration_min, vert_m, activity_history):
+    """(low, high) km this athlete would cover in `duration_min` at `vert_m`.
+
+    An ESTIMATE from their own history, never a plan target -- the plan
+    prescribes long runs in time and vert, not distance, and inventing a km
+    target would be exactly the "confident wrong number" plan.py exists to
+    prevent. Returned separately from the prescribed figures and labelled as
+    such in the prompt so the model cannot present it as prescribed.
+
+    Method:
+      1. Match on vertical density, because 1100 m over 3 h is a different run
+         from 400 m over 3 h. Density depends on distance and distance is what
+         we are solving for, so iterate to a fixed point.
+      2. Fade for duration. Most logged runs are 1-2 h; a 3 h run is slower per
+         hour than any of them, and an estimate that ignores this reads high
+         every time. FADE_PER_HOUR was calibrated by back-testing every run
+         over 1h48 against only the data that preceded it -- at 0.09/h the
+         +/-10% band contained the real distance in all six cases, including
+         the 3h36 / 803 m run (predicted 21.9-25.7, actual 23.5).
+
+    Returns None when history is too thin to say anything honest, which is the
+    correct answer more often than a number is.
+    """
+    runs = _run_history(activity_history)
+    if len(runs) < 5 or not duration_min:
+        return None
+
+    hours = duration_min / 60.0
+    speed = median(r[0] for r in runs)
+    peers = runs
+    for _ in range(8):
+        km = speed * hours
+        if km <= 0:
+            return None
+        density = (vert_m or 0) / km
+        peers = None
+        if density > 0:
+            for lo, hi in DENSITY_BANDS:
+                match = [r for r in runs if lo * density <= r[1] <= hi * density]
+                if len(match) >= MIN_PEERS:
+                    peers = match
+                    break
+            if peers is None:
+                # Nothing in their history resembles today's steepness. Falling
+                # back to flat runs would quietly predict flat-run pace for a
+                # climb they have never done. Say nothing instead.
+                return None
+        else:
+            peers = runs
+        new = median(r[0] for r in peers)
+        if abs(new - speed) < 0.02:
+            speed = new
+            break
+        speed = new
+
+    peer_hours = median(r[2] for r in peers)
+    if hours > peer_hours:
+        speed *= max(FADE_FLOOR, 1 - FADE_PER_HOUR * (hours - peer_hours))
+
+    km = speed * hours
+    return (round(km * (1 - SPREAD), 1), round(km * (1 + SPREAD), 1))
+
+
+def _hr_guidance(hr_zones, effort_hint: str):
+    """Actual bpm numbers for today's effort, not zone labels.
+
+    "Keep it in Z1-Z2" is only actionable if you remember what Z2 is in bpm.
+    The zone table is already in the prompt; this puts the two numbers that
+    matter for today's session on the session line itself.
+    """
+    if not isinstance(hr_zones, dict):
+        return None
+    z1 = hr_zones.get("z1_easy_aerobic_bpm")
+    z2 = hr_zones.get("z2_upper_aerobic_bpm")
+    z3 = hr_zones.get("z3_sub_threshold_bpm")
+    hint = (effort_hint or "").lower()
+
+    if "z3" in hint or "z4" in hint or "threshold" in hint or "interval" in hint:
+        parts = []
+        if z3:
+            parts.append(f"work reps {z3[0]}-{z3[1]} bpm")
+        if hr_zones.get("z4_near_lt_bpm"):
+            z4 = hr_zones["z4_near_lt_bpm"]
+            parts.append(f"top end {z4[0]}-{z4[1]} bpm")
+        if z1:
+            parts.append(f"recoveries below {z1[1]} bpm")
+        return "; ".join(parts) or None
+
+    if not (z1 and z2):
+        return None
+    ceiling = z2[1]
+    line = (f"average below {z2[0]} bpm, hard ceiling {ceiling} bpm "
+            f"(Z1 {z1[0]}-{z1[1]}, upper Z2 {z2[0]}-{z2[1]})")
+    if z3:
+        line += f"; Z3 starts at {z3[0]} bpm -- do not cross it"
+    return line
+
+
+def _is_run_day(planned: dict) -> bool:
+    t = str((planned or {}).get("type") or "").lower()
+    return bool(t) and t not in ("rest", "rest_or_walk")
+
+
+def build_prescription(ctx: dict, activity_history=None) -> str:
+    """The concrete session the plan calls for today, or "" on non-run days.
+
+    Every figure here is either read from plan.json or, for the distance
+    estimate alone, computed from stored activity rows -- and the estimate is
+    flagged as an estimate.
+    """
+    planned = ctx.get("planned_today")
+    if not _is_run_day(planned):
+        return ""
+
+    desc = planned.get("description") or ""
+    stated = _stated(desc)
+    lr = ctx.get("long_run_target") or {}
+    is_long = "long" in str(planned.get("type") or "").lower()
+
+    duration_min = lr.get("duration_min") if is_long else None
+    vert_m = lr.get("vert_m") if is_long else None
+    focus = lr.get("focus") if is_long else None
+
+    L = [f"  session type: {planned.get('type')}",
+         f"  plan's own wording: {desc or '(none)'}"]
+
+    if duration_min:
+        L.append(f"  PRESCRIBED DURATION: {duration_min} min "
+                 f"({round(duration_min / 60, 2)} h) -- run to time, not distance")
+    elif stated["duration_min"]:
+        a, b = stated["duration_min"]
+        L.append(f"  PRESCRIBED DURATION: {a} min" if a == b
+                 else f"  PRESCRIBED DURATION: {a}-{b} min")
+    else:
+        L.append("  PRESCRIBED DURATION: not specified by the plan for this day "
+                 "-- say so rather than inventing one")
+
+    if vert_m is not None:
+        L.append(f"  PRESCRIBED VERT: {vert_m} m D+")
+    elif "vert" in desc.lower():
+        L.append(f"  PRESCRIBED VERT: as stated in the plan wording above")
+    else:
+        L.append("  PRESCRIBED VERT: not specified for this day")
+
+    if stated["km"]:
+        a, b = stated["km"]
+        L.append(f"  PRESCRIBED DISTANCE: {a:g} km" if a == b
+                 else f"  PRESCRIBED DISTANCE: {a:g}-{b:g} km")
+    else:
+        est = estimate_distance_km(duration_min, vert_m, activity_history)
+        if est:
+            L.append(f"  DISTANCE: not prescribed. ESTIMATE ONLY {est[0]:g}-{est[1]:g} km, "
+                     f"from this athlete's own past runs at similar vert density. "
+                     f"Present it as an estimate, never as a target.")
+        else:
+            L.append("  DISTANCE: not prescribed by the plan and not enough "
+                     "comparable history to estimate -- say distance is not "
+                     "prescribed for this session.")
+
+    if focus:
+        L.append(f"  THIS WEEK'S SPECIFIC FOCUS (must appear in your message): {focus}")
+
+    hr = _hr_guidance(ctx.get("hr_zones"), f"{focus or ''} {desc}")
+    if hr:
+        L.append(f"  HR TARGET: {hr}")
+
+    quality = [q for q in (ctx.get("quality_sessions") or [])
+               if q.lower().startswith(ctx["weekday"].lower())]
+    for q in quality:
+        L.append(f"  PHASE PRESCRIPTION FOR THIS WEEKDAY: {q}")
+
+    if (duration_min or 0) >= 120 or any("fuel" in q.lower() for q in quality):
+        L.append("  FUELING: this is a fueling-practice session -- give a "
+                 "concrete instruction (carbs per hour, when to start, fluid), "
+                 "not the word 'fuel'.")
+
+    hb = ctx.get("heat_block")
+    if hb:
+        L.append("  HEAT: heat block is active -- state explicitly whether this "
+                 "session should go in the heat window or be moved to the cool "
+                 "part of the day, and why.")
+
+    return f"""
+
+TODAY'S PRESCRIBED SESSION -- RESOLVED FIGURES (facts, not estimates unless labelled)
+{chr(10).join(L)}
+"""
+
+
+PRESCRIPTION_FORMATTING = """\
+
+SESSION FORMATTING (required whenever a "TODAY'S PRESCRIBED SESSION" block is
+present above): your message must contain a line beginning "Today's session:"
+that states, in numbers, all of: duration, vert, HR ceiling in bpm, and the
+week's specific focus if one is given. Add the distance estimate only if one
+was supplied, marked as an estimate.
+
+- The phrases "as planned", "the full session", "as prescribed" and equivalents
+  are FORBIDDEN as a substitute for the numbers. The athlete reads this message
+  instead of opening the plan; a message that points back at the plan has
+  failed.
+- If you downgrade the session, give the NEW numbers and the original ones:
+  "2h00 instead of the prescribed 3h00, 600 m instead of 1100 m".
+- If a figure is marked "not specified" above, say that it is not prescribed.
+  Do not fill the gap.
+"""
+
+
 OUTPUT_CONTRACT = """\
 Reply in EXACTLY this format:
 
 VERDICT: <train | easy | rest>
-SESSION: <one line: the concrete session, or "rest">
+SESSION: <one line, and it must carry the numbers: duration, vert, and HR
+ceiling in bpm -- e.g. "Long run 180 min / 1100 m D+, avg <140 bpm, cap 155".
+Write "rest" only for a rest verdict. Never write "as planned".>
 CONFIDENCE: <high | medium | low>
 FLAGS: <comma-separated notable signals, or "none">
 ---
@@ -52,11 +338,13 @@ FLAGS: <comma-separated notable signals, or "none">
 Rules:
 - Use ONLY the figures given. Never estimate a total that was not provided.
 - If a value is marked unknown or missing, say so; do not fill the gap.
+- A figure explicitly labelled ESTIMATE in the user prompt may be repeated, but
+  only with the same label. Never promote it to a prescribed target.
 - If the user prompt contains a "TODAY'S PLAN CALLS FOR A STRENGTH SESSION"
   block, follow its formatting instructions for how to write out the strength
   portion of the message -- never just name a stage without listing what it
   consists of.
-"""
+""" + PRESCRIPTION_FORMATTING
 
 
 def _fmt_metrics(m: dict) -> str:
@@ -142,12 +430,14 @@ def _fmt_trend(recent: list) -> str:
 
 
 def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
-                recent, today=None, notes=None, strength_reference=None):
+                recent, today=None, notes=None, strength_reference=None,
+                activity_history=None):
     today = today or date.today()
     ctx = planmod.resolve(plan_doc, today)
     system = principles + "\n\n---\n" + OUTPUT_CONTRACT
 
     planned = ctx.get("planned_today")
+    prescription_block = build_prescription(ctx, activity_history)
     note_lines = "\n".join(f"  {n['date']} [{n['kind']}] {n['text']}"
                            for n in (notes or [])) or "  (none logged)"
 
@@ -166,6 +456,20 @@ def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
 TODAY'S PLAN CALLS FOR A STRENGTH SESSION -- REFERENCE CONTENT
 (use this to prescribe an actual circuit, not a placeholder; {stage_hint})
 {strength_reference}
+
+STRENGTH FORMATTING (required): after your normal 2-5 sentence message,
+add a line "Today's strength session:" followed by a numbered, step-by-step
+list of every exercise in the circuit you are prescribing (full stage circuit,
+or the reduced/core-only version if the strength downgrade ladder applies
+today). Each line must give: exercise name, sets x reps (or hold time), and
+rest between sets, e.g.:
+  1. Plank from knees -- 6 x 15s hold, rest 1 min between sets.
+  2. Windshield wiper (bent knees) -- 6 sets max reps, rest 1 min between sets.
+Copy exercise names, sets/reps, and rest periods exactly from the reference
+content above -- do not invent numbers or exercises that are not in it. If a
+figure (e.g. warm-up length) is not specified for the stage you're using,
+say so rather than guessing. Never write only a stage name (e.g. "Stage 1
+core and mobility") without this list underneath it.
 """
 
     user = f"""Today is {today.isoformat()} ({today.strftime('%A')}).
@@ -173,7 +477,7 @@ TODAY'S PLAN CALLS FOR A STRENGTH SESSION -- REFERENCE CONTENT
 PLAN CONTEXT (resolved from your plan -- these are facts, not estimates)
 {planmod.describe(ctx)}
   today's prescribed session: {json.dumps(planned) if planned else '(none specified)'}
-
+{prescription_block}
 LAST NIGHT / TODAY'S RECOVERY
 {_fmt_metrics(today_metrics)}
 
@@ -191,6 +495,10 @@ easier option. Strength/ME work is a different stimulus from running load
 (mostly neuromuscular/local, not cardiovascular) -- follow the strength
 downgrade rules in your principles rather than dropping it whenever running
 gets downgraded. Reference the specific numbers above in your reasoning.
+
+Write the session out in full. The athlete acts on this message alone and does
+not open the plan -- if your message does not contain the duration, the vert
+and a bpm ceiling, it has told them nothing.
 """
     return system, user
 
