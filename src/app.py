@@ -35,6 +35,14 @@ from .config import CONFIG, project_path
 from . import store, llm, notify, metrics, plan as planmod, runtime, backup_status
 
 PAGE = Path(__file__).with_name("app_page.html")
+# Tab / shortcut icons. A fixed map, not a static-folder handler: the server
+# only ever hands out these files, so no request path can reach anything else
+# on disk. favicon.ico is also requested by browsers without any <link> tag,
+# and is what the desktop shortcut points at (setup.ps1).
+STATIC = Path(__file__).with_name("static")
+ICONS = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
+         "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+         "/icon.svg": ("icon.svg", "image/svg+xml")}
 IDLE_EXIT_SECONDS = 4 * 3600      # nobody has used it for 4 h -> exit quietly
 
 FEET_STATES = ("fine", "hotspot", "blister", "pain")
@@ -283,6 +291,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path in ICONS:
+            name, ctype = ICONS[self.path]
+            try:
+                body = (STATIC / name).read_bytes()
+            except OSError:
+                return self._json({"error": "not found"}, 404)
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "max-age=86400")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

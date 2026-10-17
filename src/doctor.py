@@ -45,6 +45,52 @@ def check_env(root: Path):
         report(FAIL if placeholder else OK, f".env {key}", "not set" if placeholder else "set")
 
 
+COVERAGE_WEEKS = 16
+
+
+def plan_coverage_problems(plan_doc, start: date, weeks: int = COVERAGE_WEEKS) -> list:
+    """Days ahead with nothing planned, and weeks with no strength slot.
+
+    Winter Base Phase B was written without a day pattern: every day resolved
+    to "nothing planned", which meant 13 weeks with no strength and nothing
+    anywhere to say so. A week without strength is fine when a sub-phase spells
+    out its own days (recovery, race week) -- that was a decision, not a gap.
+    """
+    from datetime import timedelta
+    from . import plan as planmod
+    problems = []
+    first_monday = start - timedelta(days=start.weekday())
+    for w in range(weeks):
+        monday = first_monday + timedelta(weeks=w)
+        ctxs = [planmod.resolve(plan_doc, monday + timedelta(days=i)) for i in range(7)]
+        ctxs = [c for c in ctxs if c["date"] >= start.isoformat()]
+        empty = [c["date"] for c in ctxs if not c.get("planned_today")]
+        if empty:
+            problems.append(f"no session planned on {empty[0]}"
+                            + (f" (+{len(empty) - 1} more that week)" if len(empty) > 1 else ""))
+            continue
+        inherited = next((c for c in ctxs if c.get("day_pattern_inherited_from")), None)
+        if inherited:
+            problems.append(f"week of {monday}: {inherited['plan_id']} has no day pattern, "
+                            f"borrowing {inherited['day_pattern_inherited_from']}'s")
+        if (not any(c.get("strength_today") for c in ctxs)
+                and not any(c.get("sub_phase_has_pattern") for c in ctxs)):
+            problems.append(f"week of {monday}: no strength session planned")
+    return problems
+
+
+def check_plan_coverage(plan_doc, today: date):
+    problems = plan_coverage_problems(plan_doc, today)
+    if problems:
+        report(WARN, f"plan coverage, next {COVERAGE_WEEKS} weeks",
+               f"{problems[0]}" + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""))
+        for p in problems[1:6]:
+            print(f"         {p}")
+    else:
+        report(OK, f"plan coverage, next {COVERAGE_WEEKS} weeks",
+               "every day has a session, every regular week has strength")
+
+
 def check_data(cfg, project_path):
     paths = cfg["paths"]
     plan_file = Path(project_path(paths["plan"]))
@@ -61,6 +107,8 @@ def check_data(cfg, project_path):
                    + ("" if ctx.get("phase_id") else " -- today is outside every plan window"))
         except Exception as e:
             report(FAIL, "data/plan.json", f"unreadable: {e}")
+        else:
+            check_plan_coverage(planmod.load(str(plan_file)), date.today())
     for key, required in (("principles", True), ("strength_reference", False)):
         p = paths.get(key)
         if p:

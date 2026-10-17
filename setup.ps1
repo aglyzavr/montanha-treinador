@@ -162,6 +162,9 @@ $sc.TargetPath = "$Root\.venv\Scripts\pythonw.exe"    # pythonw: no console wind
 $sc.Arguments = "-m src.app"
 $sc.WorkingDirectory = $Root
 $sc.Description = "Montanha coach morning check-in (runs on this PC only)"
+# Without this the shortcut shows the generic pythonw icon. The .ico holds a
+# 256 px layer, so it stays sharp at large desktop icon sizes.
+$sc.IconLocation = "$Root\src\static\favicon.ico,0"
 $sc.Save()
 Info "Created '$lnk'. Double-click it after you wake up."
 # Earlier versions of this script registered 06:30 / Monday scheduled tasks.

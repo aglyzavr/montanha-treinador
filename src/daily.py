@@ -35,6 +35,55 @@ def sleep_synced(m: dict) -> bool:
     return bool(m.get("sleep_duration_min"))
 
 
+STAGE_LOOKBACK_DAYS = 60
+_GENERIC_STRENGTH_TEXT = {"", "done", "strength session", "strength", "gym"}
+
+
+def _last_strength_note(db, today: date):
+    """Most recent strength note that says what was done (stage/exercises).
+    Looked up over 60 days: the 7-day manual-log window used to forget a
+    logged stage after a week and fall back to Stage 1."""
+    notes = db.notes_between((today - timedelta(days=STAGE_LOOKBACK_DAYS)).isoformat(),
+                             today.isoformat())
+    detailed = [n for n in notes if n.get("kind") == "strength"
+                and (n.get("text") or "").strip().lower() not in _GENERIC_STRENGTH_TEXT]
+    return detailed[-1] if detailed else None
+
+
+def _ensure_strength(cfg, system, user, text, due, reference, last_note, progress):
+    """Strength days must come back with a circuit or a reasoned skip.
+
+    Checked in Python, like every other figure the athlete relies on: the
+    model dropped the Monday slot every single week. One corrective retry,
+    then the plan's slot and the reference circuits are appended verbatim so
+    the session is never silently lost.
+    """
+    if prompt.strength_answered(text):
+        return text
+    print("Strength section missing from the answer; asking the model again.")
+    progress("Strength section missing -- asking the model again")
+    try:
+        retry = llm.chat(cfg, system, user, followup=(text, prompt.STRENGTH_RETRY))
+        if llm.parse_header(retry).get("VERDICT"):
+            text = retry
+    except Exception as e:
+        print(f"Strength retry failed: {e}")
+    if prompt.strength_answered(text):
+        return text
+    print("Strength still missing after retry; appending the plan's strength session.")
+    return text.rstrip() + "\n\n" + prompt.strength_fallback(due, reference, last_note)
+
+
+def _session_detail(header: dict):
+    """SESSION plus the strength call, so the weekly review's list of daily
+    verdicts shows strength too (no schema change)."""
+    session = header.get("SESSION")
+    strength = header.get("STRENGTH")
+    if strength and strength.strip().lower() != "none planned":
+        return f"{session or ''} | strength: {strength}".strip(" |")
+    return session
+
+
 def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
         progress=lambda step: None):
     """deliver=True: the CLI path -- send to Telegram, alert on failure.
@@ -123,10 +172,22 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
         except FileNotFoundError:
             strength_reference = None
 
+    # This week's strength so far, so a missed slot is offered again later in
+    # the week instead of silently disappearing.
+    week_start = today - timedelta(days=today.weekday())
+    strength_status = prompt.strength_status(
+        plan_doc, today,
+        db.notes_between(week_start.isoformat(), today.isoformat()),
+        db.activities_between(week_start.isoformat(), today.isoformat()))
+    last_strength_note = _last_strength_note(db, today)
+    due = prompt.strength_due(plan_doc, today, strength_status) if strength_reference else None
+
     system, user = prompt.build_daily(principles, plan_doc, m_today, yest_acts,
                                       recent, today=today, notes=notes,
                                       strength_reference=strength_reference,
-                                      activity_history=history)
+                                      activity_history=history,
+                                      strength_status=strength_status,
+                                      last_strength_note=last_strength_note)
 
     progress("Thinking (local model)")
     try:
@@ -136,6 +197,10 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
             notify.send(cfg, runtime.failure_message("daily (model call)", e))
             e.notified = True
         raise
+
+    if due:
+        text = _ensure_strength(cfg, system, user, text, due, strength_reference,
+                                last_strength_note, progress)
 
     header = llm.parse_header(text)
     message = llm.human_part(text) or text
@@ -153,7 +218,7 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
         header.get("VERDICT"),
         text,
         cfg["model"]["name"],
-        session_detail=header.get("SESSION"),
+        session_detail=_session_detail(header),
         phase_id=ctx.get("phase_id"),
     )
 

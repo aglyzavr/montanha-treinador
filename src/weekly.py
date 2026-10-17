@@ -91,6 +91,15 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
                                 coverage_days=coverage)
     gaps = metrics.missing_days(activities, week_metrics, week_start, week_end)
 
+    # Planned strength vs evidence, so "0 of 2" is a computed fact rather than
+    # something the model has to notice from an empty manual log.
+    slots = planmod.strength_slots(plan_doc, week_start, week_end)
+    done = metrics.strength_done_dates(notes, activities)
+    summary["strength_planned"] = len(slots)
+    summary["strength_done"] = len(done)
+    summary["strength_missed"] = ([d.isoformat() for d, _ in slots if d.isoformat() not in done]
+                                  if len(done) < len(slots) else [])
+
     principles = prompt.load_principles(project_path(cfg["paths"]["principles"]))
     system, user = prompt.build_weekly(principles, plan_doc, summary, week_metrics,
                                        recs, week_start, week_end,

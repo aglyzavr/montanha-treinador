@@ -65,6 +65,15 @@ def _is_strength(a) -> bool:
     return (a.get("type") or "") in STRENGTH_TYPES
 
 
+def strength_done_dates(notes: list, activities: list) -> set:
+    """ISO dates with evidence of a strength session: a check-in/Telegram note
+    of kind "strength", or a Garmin strength-type activity. "no_strength"
+    notes are deliberately not counted (see app.save_checkin)."""
+    days = {n["date"] for n in notes or [] if n.get("kind") == "strength"}
+    days |= {a["date"] for a in activities or [] if _is_strength(a) and a.get("date")}
+    return days
+
+
 def _start_hour(a):
     s = a.get("start_local")
     if not isinstance(s, str):
@@ -363,6 +372,15 @@ def describe(s: dict, gaps: list = None, notes: list = None,
         if cur.get("training_status"):
             L.append(f"  Training status: {cur['training_status']}"
                      + (f" -- {cur['load_ratio_feedback']}" if cur.get("load_ratio_feedback") else ""))
+
+    if s.get("strength_planned") is not None:
+        L.append("")
+        L.append("STRENGTH ADHERENCE (computed)")
+        L.append(f"  {s['strength_done']} of {s['strength_planned']} planned strength sessions "
+                 f"have evidence (check-in/Telegram or a Garmin strength activity)")
+        if s.get("strength_missed"):
+            L.append(f"  planned days with no strength logged that same day: "
+                     f"{', '.join(s['strength_missed'])}")
 
     L.append("")
     L.append("MANUAL LOG (strength, feet, soreness -- not available from Garmin)")

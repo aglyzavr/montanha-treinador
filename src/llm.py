@@ -48,19 +48,25 @@ def check_response(num_ctx: int, data: dict):
     return read
 
 
-def chat(cfg: dict, system: str, user: str) -> str:
+def chat(cfg: dict, system: str, user: str, followup: tuple = None) -> str:
+    """followup=(previous_answer, correction): re-ask in the same conversation,
+    used when Python rejects an answer (e.g. a strength day with no circuit)."""
     m = cfg["model"]
     num_ctx = int(m.get("num_ctx") or 0)
-    est = check_context(num_ctx, system, user)
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    if followup:
+        messages += [{"role": "assistant", "content": followup[0]},
+                     {"role": "user", "content": followup[1]}]
+    est = check_context(num_ctx, system, "".join(x["content"] for x in messages[1:]))
     options = {"temperature": m.get("temperature", 0.4)}
     if num_ctx:
         options["num_ctx"] = num_ctx
     payload = {
         "model": m["name"],
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        "messages": messages,
         "stream": False,
         "think": bool(m.get("think", False)),  # thinking/reasoning mode
         "options": options,

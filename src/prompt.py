@@ -6,9 +6,10 @@ working out which training week it is.
 """
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from statistics import median
 
+from . import llm
 from . import plan as planmod
 from . import metrics as metricsmod
 
@@ -31,10 +32,187 @@ def load_strength_reference(path: str) -> str:
 
 
 def _plans_strength(planned: dict) -> bool:
-    if not planned:
-        return False
-    blob = f"{planned.get('type', '')} {planned.get('description', '')}".lower()
-    return "strength" in blob
+    return planmod.strength_in(planned) is not None
+
+
+# --------------------------------------------------------------------------
+# Strength: what is due today, resolved in Python.
+#
+# Two ways strength went missing: (1) the Monday slot sits inside a
+# "rest_or_walk" day and the model treated the whole day as rest; (2) a slot on
+# a day the app wasn't opened, or that was downgraded, was never offered again.
+# strength_status() counts the week so far; strength_due() decides whether
+# today carries the plan's own slot or a make-up for a missed one.
+# --------------------------------------------------------------------------
+
+MAKEUP_BLACKOUT_DAYS = 14    # principles: no new strength load 10-14 days pre-race
+
+
+def strength_status(plan_doc, today, week_notes, week_activities) -> dict:
+    """Planned vs done for this Mon-Sun week, strictly before today."""
+    week_start = today - timedelta(days=today.weekday())
+    slots = (planmod.strength_slots(plan_doc, week_start, today - timedelta(days=1))
+             if today > week_start else [])
+    done = {d for d in metricsmod.strength_done_dates(week_notes, week_activities)
+            if week_start.isoformat() <= d < today.isoformat()}
+    missed = [(d.isoformat(), s) for d, s in slots if d.isoformat() not in done]
+    owed = max(0, min(len(slots) - len(done), len(missed)))
+    freq = (planmod.resolve(plan_doc, today).get("strength_focus") or {}).get("frequency_per_week")
+    if isinstance(freq, int):
+        owed = min(owed, max(0, freq - len(done)))
+    return {"planned_so_far": len(slots), "done_this_week": len(done),
+            "missed": missed, "owed": owed, "frequency": freq}
+
+
+def _is_hard_day(ctx: dict) -> bool:
+    t = str((ctx.get("planned_today") or {}).get("type") or "").lower()
+    if any(h in t for h in ("long", "race", "quality")):
+        return True
+    day = (ctx.get("weekday") or "").lower()
+    return bool(day) and any(q.lower().startswith(day) for q in ctx.get("quality_sessions") or [])
+
+
+def strength_due(plan_doc, today, status: dict = None):
+    """None, or {"kind": "today"|"makeup", "slot", "wording", "light", ...}.
+
+    A make-up is offered only on an easy/rest day that is not the day before a
+    long run, race or quality session (ME soreness lasts 2-3 days), and never
+    inside the pre-race blackout.
+    """
+    ctx = planmod.resolve(plan_doc, today)
+    if ctx.get("strength_today"):
+        return {"kind": "today", **ctx["strength_today"]}
+    if not status or status.get("owed", 0) <= 0 or not ctx.get("planned_today"):
+        return None
+    dtr = ctx.get("days_to_race")
+    if dtr is not None and 0 <= dtr <= MAKEUP_BLACKOUT_DAYS:
+        return None
+    tomorrow = planmod.resolve(plan_doc, today + timedelta(days=1))
+    if _is_hard_day(ctx) or _is_hard_day(tomorrow):
+        return None
+    missed_on, slot = status["missed"][-1]
+    return {"kind": "makeup", **slot, "missed_on": missed_on,
+            "tomorrow_is_strength": bool(tomorrow.get("strength_today"))}
+
+
+def _stage_hint(last_strength_note) -> str:
+    if last_strength_note:
+        return (f"last logged strength session: {last_strength_note['date']} "
+                f"\"{last_strength_note['text']}\" -- continue from that stage/exercises.")
+    return ("no strength session with details logged in the last 60 days -- default to "
+            "the Stage 1 circuits and tell the athlete to self-test with the assessment "
+            "tests in the reference, then note the stage in the check-in strength detail.")
+
+
+def build_strength_block(due, ctx, status, last_strength_note=None) -> str:
+    """The short, required strength section placed right after the running
+    prescription. The (long) reference content goes at the end of the prompt."""
+    if not due:
+        return ""
+    slot = f"strength {due['slot']}" if due.get("slot") else "strength"
+    if due["kind"] == "today":
+        L = [f"TODAY'S STRENGTH SESSION -- REQUIRED ({slot})",
+             f"  plan's own wording: \"{due['wording']}\"",
+             "  This is separate from the running verdict. A rest, walk or easy day",
+             "  still includes this session. Only the strength downgrade ladder in",
+             "  your principles can reduce or skip it, and a skip must name the reason."]
+    else:
+        L = [f"MAKE-UP STRENGTH SESSION OWED ({slot} planned {due['missed_on']}, "
+             f"not logged as done)",
+             "  Today has no strength slot of its own, but this week's planned session",
+             "  has no evidence of being done. Propose it today alongside today's",
+             "  session, unless the strength downgrade ladder says skip. If it was",
+             "  done and just not logged, tell the athlete to tick strength in the",
+             "  check-in instead."]
+        if due.get("tomorrow_is_strength"):
+            L.append("  Tomorrow is also a strength day: keep today's make-up to the reduced")
+            L.append("  circuit so the two do not stack.")
+    if due.get("light"):
+        L.append("  LIGHT / MAINTENANCE ONLY: reduced sets, bodyweight, nothing new or heavy.")
+    sf = ctx.get("strength_focus") or {}
+    if sf.get("focus") or sf.get("note"):
+        L.append("  phase strength program: "
+                 + "; ".join(x for x in (sf.get("focus"), sf.get("note")) if x))
+    if status:
+        planned = status["planned_so_far"] + (1 if due["kind"] == "today" else 0)
+        L.append(f"  strength this week: {status['done_this_week']} done before today, "
+                 f"{planned} planned up to and including today")
+    L.append(f"  stage: {_stage_hint(last_strength_note)}")
+    return "\n\n" + "\n".join(L) + "\n" + STRENGTH_FORMATTING
+
+
+STRENGTH_FORMATTING = """
+STRENGTH FORMATTING (required whenever a strength block is present above):
+- Header line "STRENGTH:" names the circuit and stage you prescribe, or
+  "skipped: <reason from the strength downgrade ladder>".
+- After your 2-5 sentence message, add a line "Today's strength session:"
+  followed by a numbered list of every exercise in the circuit (full stage
+  circuit, or the reduced/core-only version if the ladder applies today). Each
+  line gives exercise name, sets x reps (or hold time), and rest, e.g.:
+    1. Plank from knees -- 6 x 15s hold, rest 1 min between sets.
+    2. Windshield wiper (bent knees) -- 6 sets max reps, rest 1 min.
+- Copy exercise names, sets/reps and rest exactly from the strength reference
+  content at the end of this prompt. Do not invent exercises or numbers; if a
+  figure is not specified for the stage, say so.
+- Never write only a stage name without the list underneath it.
+"""
+
+
+_STRENGTH_LIST = re.compile(
+    r"today['’]?s strength session\W*(.*)", re.I | re.S)
+_NUMBERED = re.compile(r"^\s*(?:[-*]\s*)?\**\s*\d+[.)]\s*\S", re.M)
+# "skipped: sleep 4h" -- a bare "skipped" has no ladder reason and is rejected.
+_REASONED_SKIP = re.compile(r"skip\w*\s*[:\-–—(]\s*\S.{2,}", re.I)
+
+
+def strength_answered(text: str) -> bool:
+    """Did the answer deliver the strength section (or an explicit, reasoned skip)?"""
+    head = llm.parse_header(text or "").get("STRENGTH", "").strip()
+    if _REASONED_SKIP.match(head):
+        return True
+    m = _STRENGTH_LIST.search(text or "")
+    return bool(m and _NUMBERED.search(m.group(1)))
+
+
+STRENGTH_RETRY = (
+    "Your answer left out the required strength section. Reply again in the same "
+    "format, keeping your running call, and this time include the STRENGTH: header "
+    "line and, after the message, \"Today's strength session:\" with the numbered "
+    "exercise list copied from the strength reference -- or, if the strength "
+    "downgrade ladder genuinely applies, \"STRENGTH: skipped: <reason>\".")
+
+
+def reference_section(reference: str, heading_prefix: str) -> str:
+    """One '## ' section of the strength reference, heading included."""
+    if not reference:
+        return ""
+    for part in re.split(r"(?m)^(?=## )", reference):
+        if part.startswith("## " + heading_prefix):
+            return part.strip()
+    return ""
+
+
+def strength_fallback(due, reference, last_strength_note=None) -> str:
+    """Appended by Python when the model omitted strength twice. Only the plan's
+    wording and the reference's own text -- nothing invented."""
+    slot = f"strength {due['slot']}" if due.get("slot") else "strength"
+    if due["kind"] == "today":
+        lead = f"The plan calls for {slot} today (\"{due['wording']}\")."
+    else:
+        lead = (f"{slot.capitalize()} planned {due['missed_on']} has not been logged "
+                f"as done -- make it up today if you feel fine.")
+    stage = (f"Use the stage you last logged ({last_strength_note['text']})."
+             if last_strength_note else "No stage logged yet: use Stage 1.")
+    light = " Keep it light: reduced sets, bodyweight only." if due.get("light") else ""
+    parts = [f"Today's strength session (added by the app -- the coach's answer left it "
+             f"out): {lead} {stage}{light} One pass of the circuit, ~25-35 min; drop to "
+             f"core only if legs are sore or sleep was under 5 h."]
+    for h in ("Core (ch. 7)", "Stage 1-3 general strength programs",
+              "Full general-strength workout template"):
+        sec = reference_section(reference, h)
+        if sec:
+            parts.append(sec)
+    return "\n\n".join(parts)
 
 
 def load_plan(path: str) -> dict:
@@ -330,20 +508,24 @@ VERDICT: <train | easy | rest>
 SESSION: <one line, and it must carry the numbers: duration, vert, and HR
 ceiling in bpm -- e.g. "Long run 180 min / 1100 m D+, avg <140 bpm, cap 155".
 Write "rest" only for a rest verdict. Never write "as planned".>
+STRENGTH: <when the user prompt has a strength block: the circuit and stage you
+prescribe, e.g. "Stage 1 circuit + core, ~30 min", or "skipped: <reason>".
+Otherwise "none planned". VERDICT rest is about running only -- it does not
+cancel a strength session.>
 CONFIDENCE: <high | medium | low>
 FLAGS: <comma-separated notable signals, or "none">
 ---
-<2-5 sentence message to the athlete explaining the call, warm and direct>
+<2-5 sentence message to the athlete explaining the call, warm and direct;
+then, when a strength block is present, the "Today's strength session:" list>
 
 Rules:
 - Use ONLY the figures given. Never estimate a total that was not provided.
 - If a value is marked unknown or missing, say so; do not fill the gap.
 - A figure explicitly labelled ESTIMATE in the user prompt may be repeated, but
   only with the same label. Never promote it to a prescribed target.
-- If the user prompt contains a "TODAY'S PLAN CALLS FOR A STRENGTH SESSION"
-  block, follow its formatting instructions for how to write out the strength
-  portion of the message -- never just name a stage without listing what it
-  consists of.
+- If the user prompt contains a "TODAY'S STRENGTH SESSION" or "MAKE-UP
+  STRENGTH SESSION" block, follow its STRENGTH FORMATTING instructions --
+  never just name a stage without listing what it consists of.
 """ + PRESCRIPTION_FORMATTING
 
 
@@ -431,7 +613,8 @@ def _fmt_trend(recent: list) -> str:
 
 def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
                 recent, today=None, notes=None, strength_reference=None,
-                activity_history=None):
+                activity_history=None, strength_status=None,
+                last_strength_note=None):
     today = today or date.today()
     ctx = planmod.resolve(plan_doc, today)
     system = principles + "\n\n---\n" + OUTPUT_CONTRACT
@@ -441,43 +624,24 @@ def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
     note_lines = "\n".join(f"  {n['date']} [{n['kind']}] {n['text']}"
                            for n in (notes or [])) or "  (none logged)"
 
-    strength_block = ""
-    if strength_reference and _plans_strength(planned):
-        stage_notes = [n for n in (notes or []) if n.get("kind") == "strength"]
-        stage_hint = ("No strength sessions logged yet in the manual log -- "
-                       "default to the Stage 1 circuits and tell the athlete "
-                       "to self-test using the assessment tests below, then "
-                       "log the result (e.g. reply `s: stage 2`) so future "
-                       "sessions can use the right stage.") if not stage_notes \
-            else ("Check the manual log above for the athlete's last logged "
-                  "stage/exercises before picking today's circuit.")
-        strength_block = f"""
+    # The required strength section sits right under the running prescription,
+    # where the model reads it as part of today's session; the long reference
+    # text goes at the end so it doesn't bury the recovery data.
+    due = strength_due(plan_doc, today, strength_status) if strength_reference else None
+    strength_block = build_strength_block(due, ctx, strength_status, last_strength_note)
+    reference_block = f"""
 
-TODAY'S PLAN CALLS FOR A STRENGTH SESSION -- REFERENCE CONTENT
-(use this to prescribe an actual circuit, not a placeholder; {stage_hint})
+STRENGTH REFERENCE CONTENT (for the strength session above -- copy circuits
+from here, do not invent)
 {strength_reference}
-
-STRENGTH FORMATTING (required): after your normal 2-5 sentence message,
-add a line "Today's strength session:" followed by a numbered, step-by-step
-list of every exercise in the circuit you are prescribing (full stage circuit,
-or the reduced/core-only version if the strength downgrade ladder applies
-today). Each line must give: exercise name, sets x reps (or hold time), and
-rest between sets, e.g.:
-  1. Plank from knees -- 6 x 15s hold, rest 1 min between sets.
-  2. Windshield wiper (bent knees) -- 6 sets max reps, rest 1 min between sets.
-Copy exercise names, sets/reps, and rest periods exactly from the reference
-content above -- do not invent numbers or exercises that are not in it. If a
-figure (e.g. warm-up length) is not specified for the stage you're using,
-say so rather than guessing. Never write only a stage name (e.g. "Stage 1
-core and mobility") without this list underneath it.
-"""
+""" if due else ""
 
     user = f"""Today is {today.isoformat()} ({today.strftime('%A')}).
 
 PLAN CONTEXT (resolved from your plan -- these are facts, not estimates)
 {planmod.describe(ctx)}
   today's prescribed session: {json.dumps(planned) if planned else '(none specified)'}
-{prescription_block}
+{prescription_block}{strength_block}
 LAST NIGHT / TODAY'S RECOVERY
 {_fmt_metrics(today_metrics)}
 
@@ -489,7 +653,7 @@ RECENT TREND
 
 RECENT MANUAL LOG (strength / feet / soreness)
 {note_lines}
-{strength_block}
+{reference_block}
 Decide today's session. When signals conflict or data is missing, choose the
 easier option. Strength/ME work is a different stimulus from running load
 (mostly neuromuscular/local, not cardiovascular) -- follow the strength

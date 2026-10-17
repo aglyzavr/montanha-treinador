@@ -527,6 +527,196 @@ def test_sleep_not_synced_is_detected():
     assert not daily.sleep_synced({"sleep_duration_min": None})
     assert daily.sleep_synced({"sleep_duration_min": 455})
 
+# --------------------------------------------------------------------------
+# Strength (2026-10): the Monday slot was dropped every week, and a missed
+# session was never offered again
+# --------------------------------------------------------------------------
+
+def _strength_doc():
+    """Mon strength B inside a rest day, Wed strength A, race on 2026-11-27."""
+    return {"plans": [{
+        "id": "blk", "window": {"start_date": "2026-10-05", "end_date": "2026-11-29"},
+        "goal": {"event": "Race", "race_date": "2026-11-27"},
+        "weekly_day_pattern_default": {
+            "Mon": {"type": "rest_or_walk", "description": "Rest or walk + strength B (bodyweight/ME circuit)"},
+            "Tue": {"type": "club_run", "description": "12-14km"},
+            "Wed": {"type": "easy_run_plus_strength_A", "description": "45 min Z1 + strength A"},
+            "Thu": {"type": "easy_run", "description": "45 min Z1"},
+            "Fri": {"type": "easy_run_or_rest", "description": "Short Z1"},
+            "Sat": {"type": "long_run", "description": "Long"},
+            "Sun": {"type": "easy_recovery", "description": "Z1"}},
+        "strength_program": {"frequency_per_week": 2,
+                             "phases": [{"phase": "S1_base", "focus": "Stage circuits"}]},
+        "sub_phases": [{"id": "S1", "dates": {"start": "2026-10-05", "end": "2026-11-29"}}],
+    }]}
+
+
+MON, TUE, WED, THU, FRI = (date(2026, 10, 19) + timedelta(days=i) for i in range(5))
+
+
+def test_strength_slot_is_read_from_a_rest_day():
+    s = P.resolve(_strength_doc(), MON)["strength_today"]
+    assert s["slot"] == "B" and not s["light"]          # "bodyweight" is not "light"
+    assert P.resolve(_strength_doc(), WED)["strength_today"]["slot"] == "A"
+    assert P.resolve(_strength_doc(), TUE)["strength_today"] is None
+    assert P.strength_in({"type": "rest", "description": "light strength B"})["light"]
+    assert P.strength_in({"type": "race", "description": "no strength"}) is None
+
+
+def test_monday_rest_day_gets_a_required_strength_block():
+    system, user = prompt.build_daily("p", _strength_doc(), {}, [], [], today=MON,
+                                      strength_reference="REFERENCE-TEXT",
+                                      strength_status=prompt.strength_status(
+                                          _strength_doc(), MON, [], []))
+    assert "TODAY'S STRENGTH SESSION -- REQUIRED (strength B)" in user
+    assert "REFERENCE-TEXT" in user
+    # the required block comes before the recovery data, the reference after it
+    assert user.index("REQUIRED") < user.index("LAST NIGHT") < user.index("REFERENCE-TEXT")
+    assert "STRENGTH:" in system and "does not\ncancel a strength session" in system
+
+
+def test_missed_monday_is_offered_again_on_tuesday():
+    st = prompt.strength_status(_strength_doc(), TUE, [], [])
+    assert st["owed"] == 1 and st["missed"][0][0] == MON.isoformat()
+    due = prompt.strength_due(_strength_doc(), TUE, st)
+    assert due["kind"] == "makeup" and due["tomorrow_is_strength"]
+    _, user = prompt.build_daily("p", _strength_doc(), {}, [], [], today=TUE,
+                                 strength_reference="REF", strength_status=st)
+    assert "MAKE-UP STRENGTH SESSION OWED (strength B planned 2026-10-19" in user
+
+
+def test_logged_strength_is_not_owed():
+    doc = _strength_doc()
+    note = [{"date": MON.isoformat(), "kind": "strength", "text": "stage 1"}]
+    garmin_act = [{"date": MON.isoformat(), "type": "strength_training"}]
+    assert prompt.strength_status(doc, TUE, note, [])["owed"] == 0
+    assert prompt.strength_status(doc, TUE, [], garmin_act)["owed"] == 0
+    # an explicit "no" in the check-in is a missed session, not a done one
+    no = [{"date": MON.isoformat(), "kind": "no_strength", "text": "no strength session"}]
+    assert prompt.strength_status(doc, TUE, no, [])["owed"] == 1
+
+
+def test_no_makeup_the_day_before_a_long_run_or_before_a_race():
+    doc = _strength_doc()
+    st = prompt.strength_status(doc, FRI, [], [])
+    assert st["owed"] == 2
+    assert prompt.strength_due(doc, FRI, st) is None                 # Sat is the long run
+    assert prompt.strength_due(doc, THU, prompt.strength_status(doc, THU, [], []))["kind"] == "makeup"
+    race_tue = date(2026, 11, 17)                                     # 10 days out
+    assert prompt.strength_due(doc, race_tue,
+                               prompt.strength_status(doc, race_tue, [], [])) is None
+
+
+def test_strength_focus_follows_a_see_reference():
+    doc = {"plans": [
+        {"id": "old", "window": {"start_date": "2026-01-05", "end_date": "2026-02-01"},
+         "strength_program": {"frequency_per_week": 2,
+                              "phases": [{"phase": "X1_base", "focus": "base"}]}},
+        {"id": "new", "window": {"start_date": "2026-02-02", "end_date": "2026-03-01"},
+         "strength_program": "See old.strength_program; maintenance only in this block.",
+         "sub_phases": [{"id": "N1", "dates": {"start": "2026-02-02", "end": "2026-03-01"}}]}]}
+    sf = P.resolve(doc, date(2026, 2, 10))["strength_focus"]
+    assert sf["frequency_per_week"] == 2 and "maintenance only" in sf["note"]
+    assert "maintenance only" in P.describe(P.resolve(doc, date(2026, 2, 10)))
+
+
+def test_block_without_a_day_pattern_borrows_the_previous_one():
+    doc = _strength_doc()
+    doc["plans"].append({"id": "next", "window": {"start_date": "2026-11-30",
+                                                  "end_date": "2026-12-27"}})
+    ctx = P.resolve(doc, date(2026, 11, 30))                          # a Monday
+    assert ctx["day_pattern_inherited_from"] == "blk"
+    assert ctx["strength_today"]["slot"] == "B"
+
+
+def test_doctor_flags_weeks_without_strength_but_not_recovery_weeks():
+    from src import doctor
+    doc = _strength_doc()
+    assert doctor.plan_coverage_problems(doc, MON, weeks=2) == []
+    for day in ("Mon", "Wed"):
+        doc["plans"][0]["weekly_day_pattern_default"][day] = {"type": "rest", "description": "Rest"}
+    assert any("no strength" in p for p in doctor.plan_coverage_problems(doc, MON, weeks=1))
+    # a sub-phase that spells out its days (recovery, race week) is a decision
+    doc["plans"][0]["sub_phases"][0]["weekly_day_pattern"] = {"Mon": {"type": "rest"}}
+    assert doctor.plan_coverage_problems(doc, MON, weeks=1) == []
+
+
+def test_strength_answer_check():
+    listed = ("VERDICT: rest\nSTRENGTH: Stage 1 circuit\n---\nRest day.\n\n"
+              "Today’s strength session:\n1. Plank -- 6 x 15s, rest 1 min.")
+    assert prompt.strength_answered(listed)
+    assert prompt.strength_answered("VERDICT: rest\nSTRENGTH: skipped: sleep 4h\n---\nRest.")
+    assert not prompt.strength_answered("VERDICT: rest\nSTRENGTH: skipped\n---\nRest.")
+    assert not prompt.strength_answered("VERDICT: rest\nSESSION: Rest or walk\n---\nRest.")
+    assert not prompt.strength_answered("VERDICT: rest\n---\nToday's strength session: Stage 1")
+
+
+REFERENCE = """# Ref
+
+## Core (ch. 7) — finisher
+- Stage 1: plank from knees, 6x15s
+
+## Stage 1-3 general strength programs (legs/hips)
+- Stage 1: band squats 4x20
+
+## Full general-strength workout template
+1. Warm-up
+"""
+
+
+def _with_fake_chat(answers, fn):
+    from src import daily
+    calls, real = [], daily.llm.chat
+
+    def fake(cfg, system, user, followup=None):
+        calls.append(followup)
+        return answers[len(calls) - 1]
+    daily.llm.chat = fake
+    try:
+        return fn(), calls
+    finally:
+        daily.llm.chat = real
+
+
+def test_missing_strength_is_retried_once_then_appended():
+    from src import daily
+    due = {"kind": "today", "slot": "B", "wording": "Rest + strength B", "light": False}
+    bad = "VERDICT: rest\nSESSION: rest\n---\nEnjoy the rest day."
+    good = ("VERDICT: rest\nSTRENGTH: Stage 1\n---\nRest.\n\nToday's strength session:\n"
+            "1. Band squats -- 4 x 20, rest 1 min.")
+    run = lambda: daily._ensure_strength({}, "s", "u", bad, due, REFERENCE, None, lambda s: None)
+
+    text, calls = _with_fake_chat([good], run)
+    assert text == good and calls == [(bad, prompt.STRENGTH_RETRY)]
+
+    text, calls = _with_fake_chat([bad], run)
+    assert len(calls) == 1                                  # one retry, never a loop
+    assert "added by the app" in text and "strength B today" in text
+    assert "band squats 4x20" in text and "plank from knees" in text
+    assert llm.human_part(text).startswith("Enjoy the rest day.")
+
+
+def test_strength_call_is_kept_in_session_detail():
+    from src import daily
+    assert daily._session_detail({"SESSION": "rest", "STRENGTH": "Stage 1"}) == \
+        "rest | strength: Stage 1"
+    assert daily._session_detail({"SESSION": "45 min Z1", "STRENGTH": "none planned"}) == "45 min Z1"
+
+
+def test_weekly_review_states_strength_adherence():
+    s = metrics.summarize([], {}, week_start=MON, week_end=MON + timedelta(days=6))
+    s.update(strength_planned=2, strength_done=0, strength_missed=["2026-10-19", "2026-10-21"])
+    text = metrics.describe(s)
+    assert "0 of 2 planned strength sessions" in text
+    assert "2026-10-19, 2026-10-21" in text
+
+
+@needs_plan
+def test_real_plan_monday_carries_strength():
+    _, user = prompt.build_daily("p", PLAN, {}, [], [], today=date(2026, 8, 24),
+                                 strength_reference="REF")
+    assert "TODAY'S STRENGTH SESSION -- REQUIRED (strength B)" in user
+
 
 if __name__ == "__main__":
     fails = []

@@ -118,6 +118,96 @@ def _long_run_target(plan: dict, phase_id: str, week_index: int):
     }
 
 
+# --------------------------------------------------------------------------
+# Strength slots, resolved in Python.
+#
+# Strength used to exist only as a phrase inside a day's description, e.g. a
+# Monday {"type": "rest_or_walk", "description": "Rest ... + strength B"}. The
+# model read that as a rest day: no Monday recommendation from 2026-08-03 to
+# 2026-09-14 mentioned strength at all, even on a readiness-83 morning. Like
+# the phase/week arithmetic above, "is there a strength session today, and
+# which one" is now answered here and handed to the model as a fact.
+# --------------------------------------------------------------------------
+
+_STRENGTH_SLOT = re.compile(r"(?i:strength)[\s_]*([AB])\b")
+_NO_STRENGTH = re.compile(r"\bno strength\b", re.I)
+# Not "bodyweight": the regular Monday slot is a "bodyweight/ME circuit".
+_LIGHT_STRENGTH = re.compile(r"\b(light|maintenance|short)\b", re.I)
+
+
+def strength_in(planned) -> dict:
+    """{"slot", "wording", "light"} if this planned day includes strength, else None."""
+    if not isinstance(planned, dict):
+        return None
+    blob = f"{planned.get('type') or ''} {planned.get('description') or ''}"
+    if "strength" not in blob.lower() or _NO_STRENGTH.search(blob):
+        return None
+    m = _STRENGTH_SLOT.search(blob)
+    return {
+        "slot": m.group(1) if m else None,
+        "wording": (planned.get("description") or planned.get("type") or "").strip(),
+        "light": bool(_LIGHT_STRENGTH.search(blob)),
+    }
+
+
+def _strength_focus(plan_doc: dict, plan: dict, phase_id: str):
+    """This phase's entry from `strength_program`, following a "See <plan_id>"
+    reference (the Lizandro block points back at the GTSA block's program)."""
+    prog = plan.get("strength_program")
+    note = None
+    if isinstance(prog, str):
+        note = prog
+        m = re.search(r"See\s+([A-Za-z0-9_\-]+)", prog)
+        ref = next((p for p in plan_doc.get("plans") or []
+                    if m and p.get("id") == m.group(1)), None)
+        prog = ref.get("strength_program") if ref else None
+    if not isinstance(prog, dict):
+        return {"frequency_per_week": None, "focus": None, "note": note} if note else None
+
+    focus = None
+    for ph in prog.get("phases") or []:
+        if phase_id and str(ph.get("phase", "")).split("_")[0] == phase_id:
+            bits = [ph.get("focus")]
+            bits += ph.get("examples") or []
+            bits += ph.get("rules") or []
+            bits.append(ph.get("pattern"))
+            focus = "; ".join(str(b) for b in bits if b)
+            break
+    return {"frequency_per_week": prog.get("frequency_per_week"),
+            "focus": focus, "note": note}
+
+
+def _inherited_pattern(plans: list, match: dict):
+    """(pattern, plan_id) of the latest earlier plan that has a day pattern.
+
+    Safety net for a block written without `weekly_day_pattern_default`
+    (Winter Base Phase B was): without it every day resolves to "nothing
+    planned", which silently means no strength for the whole block.
+    """
+    start, _ = _window(match)
+    best = None
+    for p in plans:
+        if p is match or not p.get("weekly_day_pattern_default"):
+            continue
+        _, end = _window(p)
+        if start and end and end < start and (best is None or end > best[0]):
+            best = (end, p)
+    return (best[1]["weekly_day_pattern_default"], best[1].get("id")) if best else ({}, None)
+
+
+def strength_slots(plan_doc: dict, week_start: date, upto: date) -> list:
+    """[(date, strength_in(...)), ...] for planned strength days in
+    week_start..upto inclusive."""
+    out = []
+    d = week_start
+    while d <= upto:
+        s = resolve(plan_doc, d).get("strength_today")
+        if s:
+            out.append((d, s))
+        d += timedelta(days=1)
+    return out
+
+
 def resolve(plan_doc: dict, on: date) -> dict:
     """Everything the coach needs to know about where `on` sits in the plan."""
     ctx = {
@@ -129,6 +219,8 @@ def resolve(plan_doc: dict, on: date) -> dict:
         "target_km": None, "target_vert_m": None, "long_run_target": None,
         "quality_sessions": [], "constraints": None, "heat_block": None,
         "hr_zones": None, "planned_today": None, "notes": None,
+        "strength_today": None, "strength_focus": None,
+        "day_pattern_inherited_from": None, "sub_phase_has_pattern": False,
     }
 
     plans = plan_doc.get("plans") or []
@@ -154,6 +246,8 @@ def resolve(plan_doc: dict, on: date) -> dict:
             ctx["days_to_race"] = (rd - on).days
 
     day_pattern = match.get("weekly_day_pattern_default") or {}
+    if not day_pattern:
+        day_pattern, ctx["day_pattern_inherited_from"] = _inherited_pattern(plans, match)
     ctx["planned_today"] = day_pattern.get(on.strftime("%a"))
 
     for start, end, sp in _phase_windows(match):
@@ -184,8 +278,11 @@ def resolve(plan_doc: dict, on: date) -> dict:
             sp_pattern = sp.get("weekly_day_pattern")
             if isinstance(sp_pattern, dict) and on.strftime("%a") in sp_pattern:
                 ctx["planned_today"] = sp_pattern[on.strftime("%a")]
+                ctx["sub_phase_has_pattern"] = True
             break
 
+    ctx["strength_today"] = strength_in(ctx["planned_today"])
+    ctx["strength_focus"] = _strength_focus(plan_doc, match, ctx["phase_id"])
     return ctx
 
 
@@ -281,6 +378,10 @@ def describe(ctx: dict) -> str:
     # them.
     if ctx.get("notes"):
         lines.append(f"  phase notes: {ctx['notes']}")
+    sf = ctx.get("strength_focus") or {}
+    if sf.get("focus") or sf.get("note"):
+        lines.append("  strength program this phase: "
+                     + "; ".join(x for x in (sf.get("focus"), sf.get("note")) if x))
     if ctx.get("heat_block"):
         hb = ctx["heat_block"]
         desc = hb.get("description") if isinstance(hb, dict) else hb
