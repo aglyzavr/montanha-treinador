@@ -1,5 +1,8 @@
 # Montanha Coach
 
+> **On Windows?** Follow [WINDOWS.md](WINDOWS.md) instead: one `setup.ps1` does
+> everything below, and a morning check-in app replaces the 06:30 job.
+
 A private, local-first AI training coach. Every morning it pulls your Garmin
 sleep + yesterday's training, reasons with your book's principles and your plan
 using a **local** LLM, and sends you today's call (train / easy / rest) on

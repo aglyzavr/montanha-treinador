@@ -16,7 +16,7 @@ import shutil
 from datetime import date, datetime, timedelta
 
 from .config import CONFIG, project_path
-from . import garmin, store, prompt, llm, notify, metrics, plan as planmod, inbox
+from . import garmin, store, prompt, llm, notify, metrics, plan as planmod, inbox, runtime
 
 
 def backfill(g, db, start: date, end: date, log=print) -> list:
@@ -39,7 +39,9 @@ def backfill(g, db, start: date, end: date, log=print) -> list:
     return filled
 
 
-def run(today: date = None, dry_run: bool = False):
+def run(today: date = None, dry_run: bool = False, deliver: bool = True,
+        progress=lambda step: None):
+    """deliver=False (the app): return {"message", "summary"} instead of sending."""
     cfg = CONFIG
     db = store.Store(project_path(cfg["paths"]["db"]))
     db.init()
@@ -57,6 +59,7 @@ def run(today: date = None, dry_run: bool = False):
         print(f"Telegram ingest skipped: {e}")
 
     # 2. Backfill the window, then refresh the weekly fitness scores.
+    progress("Fetching Garmin data")
     try:
         g = garmin.connect()
         backfill(g, db, week_start, week_end)
@@ -97,10 +100,13 @@ def run(today: date = None, dry_run: bool = False):
         print(user)
         return summary
 
+    progress("Thinking (local model)")
     try:
         text = llm.chat(cfg, system, user)
     except Exception as e:
-        notify.send(cfg, f"Montanha coach: weekly model call failed: {e}")
+        if deliver:
+            notify.send(cfg, runtime.failure_message("weekly (model call)", e))
+            e.notified = True
         raise
 
     header = llm.parse_header(text)
@@ -116,7 +122,7 @@ def run(today: date = None, dry_run: bool = False):
         plan_doc, log = planmod.apply_adjustment(plan_doc, next_ctx, adj)
         applied = [l for l in log if "->" in l or l.startswith("recorded")]
         if applied:
-            with open(plan_path, "w") as f:
+            with open(plan_path, "w", encoding="utf-8") as f:
                 json.dump(plan_doc, f, indent=2, ensure_ascii=False)
             db.add_plan_version(week_end.isoformat(), json.dumps(plan_doc),
                                 "; ".join(log))
@@ -129,7 +135,8 @@ def run(today: date = None, dry_run: bool = False):
     if gaps:
         message += f"\n\nNote: {len(gaps)} day(s) had no data ({', '.join(gaps)}) — totals are a lower bound."
     if not notes:
-        message += "\n\nNo strength or foot data logged this week." + inbox.PROMPT_FOOTER
+        message += "\n\nNo strength or foot data logged this week." + (
+            inbox.PROMPT_FOOTER if deliver else "")
 
     db.add_weekly_review(
         week_start.isoformat(), week_end.isoformat(),
@@ -137,6 +144,8 @@ def run(today: date = None, dry_run: bool = False):
         header.get("CHANGES", ""), text, json.dumps(summary, default=str),
     )
 
+    if not deliver:
+        return {"message": message, "summary": summary}
     notify.send(cfg, message, subject="Montanha coach — weekly review")
     print("Weekly review sent.")
     return summary
@@ -144,4 +153,4 @@ def run(today: date = None, dry_run: bool = False):
 
 if __name__ == "__main__":
     import sys
-    run(dry_run="--dry-run" in sys.argv)
+    runtime.run_job("weekly", run, dry_run="--dry-run" in sys.argv)

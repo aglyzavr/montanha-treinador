@@ -10,6 +10,7 @@ Run:
     python tests/test_coach.py        # also works without pytest
 """
 import copy
+import functools
 import json
 import sys
 from datetime import date, datetime, timedelta
@@ -28,7 +29,29 @@ if "garminconnect" not in sys.modules:
 
 from src import inbox, llm, metrics, notify, plan as P, prompt  # noqa: E402
 
-PLAN = P.load(str(ROOT / "data" / "plan.json"))
+# plan.json is private and git-ignored, so a fresh clone (or a new machine before
+# the data folder is restored) has none. The plan-dependent tests skip in that
+# case instead of the whole suite failing at import -- which is what happened on
+# the first Windows checkout. Everything that doesn't read the plan still runs.
+_PLAN_PATH = ROOT / "data" / "plan.json"
+PLAN = P.load(str(_PLAN_PATH)) if _PLAN_PATH.exists() else None
+
+
+class _Skipped(Exception):
+    pass
+
+
+def needs_plan(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        if PLAN is None:
+            try:
+                import pytest
+            except ImportError:
+                raise _Skipped()
+            pytest.skip("data/plan.json not present (private, git-ignored)")
+        return fn(*a, **k)
+    return wrapper
 
 
 # --------------------------------------------------------------------------
@@ -59,6 +82,7 @@ def test_window_never_includes_today():
 # Plan resolution: the hallucinated target
 # --------------------------------------------------------------------------
 
+@needs_plan
 def test_deload_week_resolves_to_its_real_target():
     """The model reported 75 km for this week. It is A2 week 8, a 65 km deload."""
     ctx = P.resolve(PLAN, date(2026, 7, 27))
@@ -68,16 +92,19 @@ def test_deload_week_resolves_to_its_real_target():
     assert ctx["target_vert_m"] == 1500
 
 
+@needs_plan
 def test_phase_boundary_is_exact():
     assert P.resolve(PLAN, date(2026, 8, 2))["phase_id"] == "A2"
     assert P.resolve(PLAN, date(2026, 8, 3))["phase_id"] == "A3"
 
 
+@needs_plan
 def test_long_run_target_comes_from_the_progression_table():
     lr = P.resolve(PLAN, date(2026, 8, 3))["long_run_target"]
     assert lr["duration_min"] == 165 and lr["vert_m"] == 900
 
 
+@needs_plan
 def test_dates_outside_the_plan_return_unknown_not_garbage():
     for d in [date(2020, 1, 1), date(2035, 1, 1)]:
         ctx = P.resolve(PLAN, d)
@@ -89,6 +116,7 @@ def test_dates_outside_the_plan_return_unknown_not_garbage():
 # Plan mutation safety
 # --------------------------------------------------------------------------
 
+@needs_plan
 def test_out_of_bounds_adjustments_are_rejected():
     ctx = P.resolve(PLAN, date(2026, 8, 10))
     before = json.dumps(PLAN, sort_keys=True)
@@ -99,6 +127,7 @@ def test_out_of_bounds_adjustments_are_rejected():
         assert json.dumps(doc, sort_keys=True) == before, bad
 
 
+@needs_plan
 def test_reasonable_adjustment_is_applied():
     ctx = P.resolve(PLAN, date(2026, 8, 10))
     doc = copy.deepcopy(PLAN)
@@ -266,6 +295,7 @@ def _runs(n=12, speed=8.0, density=30.0, hours=1.5, spread=True):
     return out
 
 
+@needs_plan
 def test_long_run_day_carries_duration_vert_and_focus():
     ctx = P.resolve(PLAN, date(2026, 8, 15))       # A3 week 2, Saturday
     block = prompt.build_prescription(ctx, _runs())
@@ -274,6 +304,7 @@ def test_long_run_day_carries_duration_vert_and_focus():
     assert "Add 20 min technical descent" in block
 
 
+@needs_plan
 def test_prescription_gives_bpm_not_zone_labels():
     """Zone labels are not actionable in a Telegram message; bpm is.
 
@@ -289,6 +320,7 @@ def test_prescription_gives_bpm_not_zone_labels():
     assert f"Z3 starts at {z['z3_sub_threshold_bpm'][0]} bpm" in block
 
 
+@needs_plan
 def test_threshold_day_gets_threshold_bpm_not_easy_bpm():
     ctx = P.resolve(PLAN, date(2026, 8, 20))       # Thursday: Z3->Z4 intervals
     z = ctx["hr_zones"]
@@ -299,6 +331,7 @@ def test_threshold_day_gets_threshold_bpm_not_easy_bpm():
     assert "hard ceiling" not in block             # i.e. not the easy-day line
 
 
+@needs_plan
 def test_distance_stated_by_the_plan_is_used_verbatim():
     ctx = P.resolve(PLAN, date(2026, 8, 18))       # Tuesday club run "12-14km"
     block = prompt.build_prescription(ctx, _runs())
@@ -306,6 +339,7 @@ def test_distance_stated_by_the_plan_is_used_verbatim():
     assert "ESTIMATE" not in block
 
 
+@needs_plan
 def test_estimated_distance_is_labelled_an_estimate():
     ctx = P.resolve(PLAN, date(2026, 8, 15))
     block = prompt.build_prescription(ctx, _runs())
@@ -343,6 +377,7 @@ def test_estimate_fades_rather_than_extrapolating_pace():
     assert est and est[1] < 8.0 * 4    # below naive speed x time
 
 
+@needs_plan
 def test_rest_days_get_no_prescription_block():
     assert prompt.build_prescription(P.resolve(PLAN, date(2026, 8, 17)), _runs()) == ""
     assert prompt.build_prescription(P.resolve(PLAN, date(2035, 1, 1)), _runs()) == ""
@@ -354,6 +389,7 @@ def test_contract_forbids_answering_with_as_planned():
     assert "Today's session:" in prompt.OUTPUT_CONTRACT
 
 
+@needs_plan
 def test_daily_prompt_actually_contains_the_numbers():
     system, user = prompt.build_daily(
         "principles", PLAN, {}, [], [], today=date(2026, 8, 15),
@@ -363,11 +399,133 @@ def test_daily_prompt_actually_contains_the_numbers():
     assert "Never write \"as planned\"" in system
 
 
+@needs_plan
 def test_build_daily_works_without_history():
     """The estimate is optional; its absence must not break the daily job."""
     _, user = prompt.build_daily("p", PLAN, {}, [], [], today=date(2026, 8, 15))
     assert "PRESCRIBED DURATION: 180 min" in user
     assert "not enough" in user
+
+# --------------------------------------------------------------------------
+# Windows move (2026-10): context window, failure alerts, backup reminder
+# --------------------------------------------------------------------------
+
+def test_prompt_too_big_for_the_window_is_refused_not_truncated():
+    """Ollama silently drops the start of an oversized prompt -- the rules."""
+    big = "x" * 100_000                      # ~33k tokens at 3 chars/token
+    try:
+        llm.check_context(32768, "system", big)
+        assert False, "should have raised"
+    except llm.ContextOverflow:
+        pass
+    assert llm.check_context(32768, "system", "x" * 30_000) > 0
+
+
+def test_ollama_reporting_a_full_window_is_treated_as_truncation():
+    for data in ({"prompt_eval_count": 32768}, {"prompt_eval_count": 900, "done_reason": "length"}):
+        try:
+            llm.check_response(32768, data)
+            assert False, "should have raised"
+        except llm.ContextOverflow:
+            pass
+    assert llm.check_response(32768, {"prompt_eval_count": 9000, "done_reason": "stop"}) == 9000
+
+
+def test_failure_alert_never_leaks_the_bot_token():
+    from src import runtime
+    err = Exception("400 Client Error for url: https://api.telegram.org/bot123456:AAbbCC-dd_ee/sendMessage")
+    msg = runtime.failure_message("daily", err)
+    assert "AAbbCC" not in msg and "bot***" in msg
+    assert "no recommendation" in msg
+
+
+def test_failure_alert_tells_you_what_to_do():
+    from src import runtime
+    assert "Ollama" in runtime.hint_for(ConnectionError("localhost port=11434 refused"))
+    assert "num_ctx" in runtime.hint_for(llm.ContextOverflow("too big"))
+    assert "setup_garmin_login" in runtime.hint_for(Exception("401 Unauthorized"))
+
+
+def test_backup_reminder_only_after_the_limit():
+    from src import backup_status
+    cfg = {"backup": {"remind_after_days": 14}}
+    now = datetime(2026, 10, 30)
+    assert backup_status.reminder(cfg, now=now, last=datetime(2026, 10, 20)) == ""
+    assert "20 days" in backup_status.reminder(cfg, now=now, last=datetime(2026, 10, 10))
+    assert "never" in backup_status.reminder(cfg, now=now, last=None)
+
+# --------------------------------------------------------------------------
+# Morning check-in app (2026-10): taps replace the Telegram reply codes
+# --------------------------------------------------------------------------
+
+def test_checkin_round_trip_and_resave_does_not_duplicate(tmp_path=None):
+    import tempfile
+    from src import store as S, app
+    d = Path(tmp_path or tempfile.mkdtemp())
+    db = S.Store(str(d / "c.db")); db.init()
+    today = date(2026, 10, 15)
+    form = {"strength": "yes", "strength_text": "stage 1 circuit", "soreness": "3",
+            "feet": "hotspot", "feet_text": "left heel", "rpe": "6", "note": "slight cold"}
+    app.save_checkin(db, today, form)
+    app.save_checkin(db, today, form)                    # saved twice: no duplicates
+    assert app.read_checkin(db, today) == {**form, "soreness": 3, "rpe": 6}
+    notes = db.notes_between("2026-10-14", "2026-10-15")
+    assert len(notes) == 5
+    tally = inbox.summarize_notes(notes)
+    assert tally["strength"] == 1 and tally["soreness"] == [("2026-10-15", "3")]
+
+
+def test_checkin_no_strength_is_not_counted_as_a_session(tmp_path=None):
+    import tempfile
+    from src import store as S, app
+    db = S.Store(str(Path(tmp_path or tempfile.mkdtemp()) / "c.db")); db.init()
+    app.save_checkin(db, date(2026, 10, 15), {"strength": "no"})
+    assert inbox.summarize_notes(db.notes_between("2026-10-14", "2026-10-15"))["strength"] == 0
+    # clearing a field removes the entry: skipped means unlogged, never assumed
+    app.save_checkin(db, date(2026, 10, 15), {})
+    assert db.notes_between("2026-10-14", "2026-10-15") == []
+
+
+def test_checkin_never_touches_telegram_history(tmp_path=None):
+    import tempfile
+    from src import store as S, app
+    db = S.Store(str(Path(tmp_path or tempfile.mkdtemp()) / "c.db")); db.init()
+    db.add_note("2026-10-14", "strength", "done", "squats", update_id=42)
+    app.save_checkin(db, date(2026, 10, 15), {})
+    assert [n["update_id"] for n in db.notes_between("2026-10-14", "2026-10-15")] == [42]
+
+
+def test_sub_phase_day_pattern_overrides_block_default():
+    # Lizandro race week puts the race on Friday; the block default has an easy
+    # run there. Without the override the coach would prescribe a Z1 jog on
+    # race day.
+    doc = {"plans": [{
+        "id": "blk", "window": {"start_date": "2026-11-02", "end_date": "2026-11-15"},
+        "weekly_day_pattern_default": {"Fri": {"type": "easy_run_or_rest", "description": "Z1"}},
+        "sub_phases": [
+            {"id": "RW", "dates": {"start": "2026-11-02", "end": "2026-11-08"},
+             "weekly_day_pattern": {"Fri": {"type": "race", "description": "102.5 km"}}},
+            {"id": "PR", "dates": {"start": "2026-11-09", "end": "2026-11-15"}},
+        ]}]}
+    assert P.resolve(doc, date(2026, 11, 6))["planned_today"]["type"] == "race"
+    # sub-phase without its own pattern falls back to the block default
+    assert P.resolve(doc, date(2026, 11, 13))["planned_today"]["type"] == "easy_run_or_rest"
+
+
+def test_sub_phase_notes_reach_the_prompt():
+    # notes were resolved into ctx but never printed, so the model never saw
+    # them (e.g. the Lizandro go/no-go check).
+    doc = {"plans": [{
+        "id": "blk", "window": {"start_date": "2026-10-26", "end_date": "2026-11-01"},
+        "sub_phases": [{"id": "L2", "dates": {"start": "2026-10-26", "end": "2026-11-01"},
+                        "notes": "Go/no-go check on Thursday"}]}]}
+    assert "Go/no-go check on Thursday" in P.describe(P.resolve(doc, date(2026, 10, 29)))
+
+
+def test_sleep_not_synced_is_detected():
+    from src import daily
+    assert not daily.sleep_synced({"sleep_duration_min": None})
+    assert daily.sleep_synced({"sleep_duration_min": 455})
 
 
 if __name__ == "__main__":
@@ -380,5 +538,9 @@ if __name__ == "__main__":
             except AssertionError as e:
                 print(f"  FAIL  {name}  {e}")
                 fails.append(name)
+            except BaseException as e:   # _Skipped, or pytest's Skipped
+                if type(e).__name__ not in ("_Skipped", "Skipped"):
+                    raise
+                print(f"  SKIP  {name}  (no data/plan.json)")
     print(f"\n{'FAILED: ' + ', '.join(fails) if fails else 'All tests passed.'}")
     sys.exit(1 if fails else 0)

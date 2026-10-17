@@ -302,6 +302,27 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def replace_app_note(self, d, kind, value, text):
+        """Check-in form entries. Saving the form again replaces that day's
+        entry of the same kind instead of stacking duplicates. Only touches
+        rows without a Telegram update_id, so Telegram history is never
+        rewritten. value/text None = remove the entry (field cleared)."""
+        with self._conn() as c:
+            c.execute("DELETE FROM manual_notes WHERE date = ? AND kind = ? "
+                      "AND update_id IS NULL", (d, kind))
+            if value is not None or text:
+                c.execute(
+                    "INSERT INTO manual_notes (date, received_at, kind, value, text) "
+                    "VALUES (?,?,?,?,?)", (d, _now(), kind, value, text or ""))
+
+    def missing_days_count(self, start: date, end: date) -> int:
+        return len(self.missing_activity_dates(start, end))
+
+    def weekly_review_exists(self, week_start: str) -> bool:
+        with self._conn() as c:
+            return c.execute("SELECT 1 FROM weekly_reviews WHERE week_start = ?",
+                             (week_start,)).fetchone() is not None
+
     def notes_between(self, start: str, end: str):
         with self._conn() as c:
             rows = c.execute(

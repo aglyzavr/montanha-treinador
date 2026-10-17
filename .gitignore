@@ -221,3 +221,6 @@ __marimo__/
 *.pyc
 data/*
 logs/*.log
+
+# Visual Studio local state (indexes, Copilot caches) -- never commit
+.vs/

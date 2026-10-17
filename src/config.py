@@ -1,5 +1,6 @@
 """Loads non-secret config (config.yaml) and secrets (.env)."""
 import os
+import sys
 from pathlib import Path
 
 import yaml
@@ -9,7 +10,16 @@ ROOT = Path(__file__).resolve().parent.parent
 
 load_dotenv(ROOT / ".env")
 
-with open(ROOT / "config.yaml", "r") as _f:
+# Every text file in this project is UTF-8. On Windows the default encoding is
+# cp1252, which mis-reads "—"/"ç" in plan.json and principles and can crash a
+# print() under Task Scheduler. Read explicitly and make stdout tolerant.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+with open(ROOT / "config.yaml", "r", encoding="utf-8") as _f:
     CONFIG = yaml.safe_load(_f)
 
 

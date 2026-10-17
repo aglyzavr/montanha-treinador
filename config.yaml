@@ -3,13 +3,25 @@
 timezone: "Europe/Lisbon"        # <-- set to your timezone
 
 model:
-  # CONFIRM the exact tag on ollama.com/library before first run.
-  # Primary (best quality that fits 48 GB): Q8. Fallback if memory is tight: q6_k.
+  # Windows PC (RTX 5060 8 GB + 32 GB RAM): the plain "qwen3.6:35b" tag is the
+  # Q4 build (~22 GB). It doesn't fit the GPU alone; Ollama splits it between
+  # GPU and RAM automatically. Slower than the Mac's Q8, irrelevant at 06:30.
+  # Run `python -m src.doctor` to see which quantization is actually installed.
+  # Mac (48 GB unified memory) used: "qwen3.6:35b-a3b-q8_0".
   name: "qwen3.6:35b"
   host: "http://localhost:11434"
   think: true                    # thinking / reasoning mode (verify option name for your Ollama version)
   temperature: 0.4
-  timeout_seconds: 900           # generous: it runs while you sleep
+  # Context window in tokens. Must hold the whole prompt (principles + plan +
+  # 14 days of history + strength reference) PLUS the model's thinking and
+  # answer. Ollama's default is far smaller and it truncates silently -- see
+  # llm.check_context. 32k fits comfortably in 32 GB RAM with the q8_0 KV cache
+  # that setup.ps1 enables.
+  num_ctx: 32768
+  # 0 = unload the model as soon as the answer arrives, so ~22 GB of RAM is free
+  # again for everything else on the PC. Use "10m" to keep it warm instead.
+  keep_alive: 0
+  timeout_seconds: 2400          # GPU+RAM split with thinking: allow up to 40 min
 
 context_days: 14                 # how many days of history the daily prompt includes
 
@@ -22,3 +34,16 @@ paths:
   principles: "data/coach_principles.md"
   plan: "data/plan.json"
   strength_reference: "data/strength_reference_uphill_athlete.md"
+
+app:
+  # The morning check-in app (python -m src.app / desktop shortcut). Listens on
+  # this PC only (127.0.0.1); nothing on the network can reach it.
+  port: 8765
+
+backup:
+  # Backups go ONLY to a drive you plug in. Create a folder with exactly this
+  # name at the root of the SSD once; scripts/backup.py finds it whatever drive
+  # letter Windows gives the SSD. Nothing is ever copied anywhere else.
+  folder_name: "montanha-backup"
+  keep: 30                       # dated snapshots kept on the SSD (oldest pruned)
+  remind_after_days: 14          # daily message adds a one-line nudge after this

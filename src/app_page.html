@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Montanha coach</title>
+<style>
+  /* Offline by design: no web fonts, nothing fetched from the internet.
+     Bahnschrift ships with Windows -- a DIN-style signage face, the type of
+     trail markers and route boards -- used for the date and the verdict. */
+  :root {
+    --paper: #eef0ec;   /* granite, cool */
+    --card: #f8f9f6;
+    --ink: #1f2a2e;     /* slate */
+    --muted: #5f6d72;   /* schist */
+    --line: #d3d8d2;
+    --train: #2f7a4a;   /* moss */
+    --easy: #b8861f;    /* ochre */
+    --rest: #3f6596;    /* river slate-blue: rest is calm, not an alarm */
+    --warn: #a3412c;
+    --sign: "Bahnschrift", "DIN Alternate", "Arial Narrow", system-ui, sans-serif;
+    --body: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #161c1e; --card: #1d2528; --ink: #e4e9e6; --muted: #9aa7aa;
+      --line: #2f3a3d; --train: #5fb37c; --easy: #e0b04e; --rest: #7fa3d6; --warn: #e07a62;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink);
+         font: 16px/1.5 var(--body); }
+  main { max-width: 680px; margin: 0 auto; padding: 40px 20px 64px; }
+  header h1 { font: 600 44px/1.05 var(--sign); font-stretch: 85%; margin: 0;
+              letter-spacing: -0.5px; }
+  header p { margin: 6px 0 0; color: var(--muted); }
+
+  section { margin-top: 36px; }
+  h2 { font: 600 20px/1.2 var(--sign); margin: 0 0 14px; }
+  .q { display: grid; grid-template-columns: 150px 1fr; gap: 6px 16px;
+       align-items: start; padding: 10px 0; border-top: 1px solid var(--line); }
+  .q > span { color: var(--muted); padding-top: 7px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font: inherit; font-size: 15px; padding: 6px 12px; border-radius: 999px;
+          border: 1px solid var(--line); background: var(--card); color: var(--ink);
+          cursor: pointer; }
+  .chip:hover { border-color: var(--muted); }
+  .chip[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .chip.num { min-width: 38px; padding: 6px 0; text-align: center; }
+  input[type=text], textarea { font: inherit; width: 100%; margin-top: 6px; padding: 7px 10px;
+          border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); }
+  textarea { min-height: 60px; resize: vertical; margin-top: 0; }
+  .hidden { display: none !important; }
+  .small { font-size: 14px; color: var(--muted); }
+  :focus-visible { outline: 2px solid var(--rest); outline-offset: 2px; }
+
+  .go { margin-top: 26px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .btn { font: 600 17px var(--sign); padding: 12px 22px; border-radius: 8px; border: 0;
+         background: var(--ink); color: var(--paper); cursor: pointer; }
+  .btn.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  /* The one bold thing: the verdict, painted like a trail blaze. */
+  .call { margin-top: 32px; padding: 26px 26px 22px; background: var(--card);
+          border-left: 10px solid var(--v, var(--muted)); border-radius: 4px; }
+  .verdict { display: flex; align-items: center; gap: 14px; }
+  .blaze { display: grid; gap: 4px; }
+  .blaze i { display: block; width: 40px; height: 12px; border-radius: 1px; background: var(--v); }
+  .blaze i:first-child { background: var(--card); outline: 1px solid var(--line); }
+  .verdict b { font: 700 64px/0.9 var(--sign); font-stretch: 80%; color: var(--v); }
+  .message { white-space: pre-wrap; margin: 18px 0 0; max-width: 64ch; }
+  .actions { margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .progress { color: var(--muted); }
+  .progress .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                   background: var(--easy); margin-right: 8px; vertical-align: 1px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .running .dot { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .25; } }
+  }
+  .error { color: var(--warn); }
+  .note { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--line); }
+  @media (max-width: 560px) { .q { grid-template-columns: 1fr; } .q > span { padding-top: 0; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="date">Montanha coach</h1>
+    <p id="plan"></p>
+  </header>
+
+  <section id="checkin">
+    <h2>Yesterday</h2>
+    <div class="q"><span>Strength session</span>
+      <div><div class="chips" data-field="strength">
+        <button class="chip" data-v="yes">Yes</button><button class="chip" data-v="no">No</button>
+      </div>
+      <input type="text" id="strength_text" class="hidden" placeholder="What did you do? e.g. stage 1 circuit, 3 rounds"></div>
+    </div>
+    <div class="q"><span>Feet</span>
+      <div><div class="chips" data-field="feet">
+        <button class="chip" data-v="fine">Fine</button><button class="chip" data-v="hotspot">Hotspot</button>
+        <button class="chip" data-v="blister">Blister</button><button class="chip" data-v="pain">Pain</button>
+      </div>
+      <input type="text" id="feet_text" class="hidden" placeholder="Where? e.g. left heel"></div>
+    </div>
+    <div class="q"><span>How hard it felt</span>
+      <div><div class="chips" data-field="rpe" id="rpe"></div>
+      <div class="small">1 barely an effort, 10 all-out. Skip if you didn't train.</div></div>
+    </div>
+
+    <h2 style="margin-top:28px">This morning</h2>
+    <div class="q"><span>Legs</span>
+      <div><div class="chips" data-field="soreness">
+        <button class="chip" data-v="1">Fresh</button><button class="chip" data-v="2">A bit used</button>
+        <button class="chip" data-v="3">Sore</button><button class="chip" data-v="4">Very sore</button>
+        <button class="chip" data-v="5">Wrecked</button>
+      </div></div>
+    </div>
+    <div class="q"><span>Anything else</span>
+      <textarea id="note" placeholder="Sleep was broken by the dog, slight cold, busy work day..."></textarea>
+    </div>
+    <p class="small">Skip anything you don't know. The coach treats a skipped answer as not logged, never as done.</p>
+  </section>
+
+  <div class="go">
+    <button class="btn" id="run">Get today's call</button>
+    <span class="progress small" id="model"></span>
+  </div>
+  <p id="status" class="progress"></p>
+  <p id="gap" class="small hidden"></p>
+
+  <div class="call hidden" id="call">
+    <div class="verdict"><span class="blaze"><i></i><i></i></span><b id="verdict"></b></div>
+    <p class="message" id="message"></p>
+    <div class="actions">
+      <button class="btn secondary" id="send">Send to phone</button>
+      <span class="small" id="sent"></span>
+    </div>
+  </div>
+
+  <section id="weekly" class="hidden">
+    <h2>Last week</h2>
+    <p id="weekly_text" class="small"></p>
+    <button class="btn secondary" id="run_weekly">Review last week</button>
+    <div class="call hidden" id="wcall" style="--v: var(--muted)">
+      <p class="message" id="wmessage" style="margin-top:0"></p>
+      <div class="actions">
+        <button class="btn secondary" id="wsend">Send to phone</button>
+        <span class="small" id="wsent"></span>
+      </div>
+    </div>
+  </section>
+
+  <p class="note small" id="footer"></p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const form = { strength: null, feet: null, rpe: null, soreness: null };
+let poll = null;
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Coach": "1" },
+    body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+// RPE chips 1..10
+for (let i = 1; i <= 10; i++) {
+  const b = document.createElement("button");
+  b.className = "chip num"; b.dataset.v = String(i); b.textContent = i;
+  $("rpe").appendChild(b);
+}
+
+// Chip groups: click selects, clicking the selected one clears it.
+document.querySelectorAll(".chips").forEach((group) => {
+  group.addEventListener("click", (e) => {
+    const b = e.target.closest(".chip"); if (!b) return;
+    const field = group.dataset.field;
+    form[field] = form[field] === b.dataset.v ? null : b.dataset.v;
+    paintChips(); saveSoon();
+  });
+});
+["strength_text", "feet_text", "note"].forEach((id) => $(id).addEventListener("input", saveSoon));
+
+function paintChips() {
+  document.querySelectorAll(".chips").forEach((g) => {
+    g.querySelectorAll(".chip").forEach((b) =>
+      b.setAttribute("aria-pressed", String(form[g.dataset.field] === b.dataset.v)));
+  });
+  $("strength_text").classList.toggle("hidden", form.strength !== "yes");
+  $("feet_text").classList.toggle("hidden", !form.feet || form.feet === "fine");
+}
+
+function checkinPayload() {
+  return { ...form, strength_text: $("strength_text").value,
+           feet_text: $("feet_text").value, note: $("note").value };
+}
+let saveTimer = null;
+function saveSoon() {           // answers are kept as you go; nothing to "submit"
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => api("/api/checkin", checkinPayload()), 600);
+}
+
+const VCOLOR = { train: "var(--train)", easy: "var(--easy)", rest: "var(--rest)" };
+function showCall(v, message) {
+  const key = (v || "").toLowerCase().split(/[^a-z]/)[0];
+  $("call").style.setProperty("--v", VCOLOR[key] || "var(--muted)");
+  $("verdict").textContent = key ? key[0].toUpperCase() + key.slice(1) : "Today";
+  $("message").textContent = message;
+  $("call").classList.remove("hidden");
+  $("sent").textContent = "";
+}
+
+function fmt(sec) { return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`; }
+
+function renderJob(job) {
+  const st = $("status");
+  const busy = job.state === "running";
+  $("run").disabled = busy; $("run_weekly").disabled = busy;
+  st.classList.toggle("running", busy);
+  if (busy) {
+    st.innerHTML = `<span class="dot"></span>${job.step}... ${fmt(job.elapsed || 0)}`;
+    if (job.step && job.step.startsWith("Thinking"))
+      st.innerHTML += " <span class='small'>(usually a few minutes on this PC)</span>";
+    return;
+  }
+  clearInterval(poll); poll = null;
+  if (job.state !== "running") $("gap").classList.add("hidden");
+  if (job.state === "done" && job.kind === "daily") {
+    st.textContent = ""; showCall(job.result.verdict, job.result.message);
+    $("run").textContent = "Run again";
+  } else if (job.state === "done" && job.kind === "weekly") {
+    st.textContent = ""; $("wmessage").textContent = job.result.message;
+    $("wcall").classList.remove("hidden"); $("run_weekly").classList.add("hidden");
+    $("weekly_text").textContent = "Reviewed. Any plan change is already saved, with a backup of the old plan.";
+  } else if (job.state === "needs_sleep") {
+    st.innerHTML = `Last night's sleep isn't in Garmin yet. Open Garmin Connect on your phone so the watch syncs, then try again. `
+      + `<button class="btn secondary" id="force" style="padding:6px 12px;font-size:14px">Run without sleep data</button>`;
+    $("force").onclick = () => start("daily", true);
+  } else if (job.state === "error") {
+    st.innerHTML = "";
+    const e = document.createElement("span"); e.className = "error";
+    e.textContent = `That didn't work: ${job.error}`;
+    const h = document.createElement("div"); h.className = "small"; h.textContent = job.hint || "";
+    st.append(e, h);
+  }
+}
+
+async function start(kind, force) {
+  const body = kind === "daily" ? { force: !!force, checkin: checkinPayload() } : {};
+  const r = await api(kind === "daily" ? "/api/daily" : "/api/weekly", body);
+  if (!r.ok) { $("status").textContent = r.error; return; }
+  watch();
+}
+function watch() {
+  if (poll) return;
+  const tick = async () => renderJob(await api("/api/job"));
+  tick(); poll = setInterval(tick, 1000);
+}
+
+$("run").onclick = () => start("daily", false);
+$("run_weekly").onclick = () => start("weekly");
+async function send(kind, out) {
+  out.textContent = "Sending...";
+  const r = await api("/api/send", { kind });
+  out.textContent = r.ok ? "Sent to Telegram." : `Not sent: ${r.error}`;
+}
+$("send").onclick = () => send("daily", $("sent"));
+$("wsend").onclick = () => send("weekly", $("wsent"));
+
+async function modelState() {
+  const s = await api("/api/status");
+  $("model").textContent = !s.ollama.up ? "Ollama isn't running. Open the Ollama app."
+    : s.ollama.loaded ? "Model ready" : "Loading the model in the background...";
+  if (s.ollama.up && !s.ollama.loaded) setTimeout(modelState, 5000);
+}
+
+(async function init() {
+  const s = await api("/api/status");
+  $("date").textContent = s.date_label;
+  const p = s.plan || {};
+  $("plan").textContent = p.error ? p.error
+    : [p.phase_name || p.phase_id ? `${p.phase_name || p.phase_id}${p.week_in_phase ? `, week ${p.week_in_phase}` : ""}` : "",
+       p.days_to_race != null ? `${p.days_to_race} days to ${p.plan_label || "the race"}` : ""]
+      .filter(Boolean).join(". ");
+  const c = s.checkin;
+  Object.assign(form, { strength: c.strength, feet: c.feet,
+    rpe: c.rpe ? String(c.rpe) : null, soreness: c.soreness ? String(c.soreness) : null });
+  $("strength_text").value = c.strength_text || ""; $("feet_text").value = c.feet_text || "";
+  $("note").value = c.note || ""; paintChips();
+  if (s.missing_days > 0) {
+    $("gap").textContent = `${s.missing_days} earlier day(s) are missing from Garmin. `
+      + `They'll be fetched first when you press Get today's call (about 10 seconds per day).`;
+    $("gap").classList.remove("hidden");
+  }
+  if (s.today) { showCall(s.today.verdict, s.today.message); $("run").textContent = "Run again"; }
+  if (!s.weekly.done) {
+    $("weekly").classList.remove("hidden");
+    $("weekly_text").textContent = `${s.weekly.label} hasn't been reviewed yet. Takes a few minutes; it can adjust next week's plan within safe limits.`;
+  }
+  $("footer").textContent = (s.backup ? s.backup + " " : "") + `Everything here runs on this PC with ${s.model}.`;
+  if (s.job.state === "running") watch();
+  if (s.ollama.up && !s.ollama.loaded && s.job.state !== "running") api("/api/warm", {});
+  modelState();
+})();
+</script>
+</body>
+</html>

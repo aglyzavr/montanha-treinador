@@ -29,7 +29,8 @@ _MONTHS = {
 
 
 def load(path: str) -> dict:
-    with open(path, "r") as f:
+    # Explicit utf-8: Windows defaults to cp1252 and plan.json carries "—", "ç", "Ã".
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -174,6 +175,15 @@ def resolve(plan_doc: dict, on: date) -> dict:
                 "notes": sp.get("notes") or sp.get("targets"),
                 "long_run_target": _long_run_target(match, sp.get("id"), week_index),
             })
+            # A sub-phase may carry its own weekly_day_pattern. Added for the
+            # 2026 Lizandro 100K block: the taper week and race week need a
+            # different day-by-day shape (race on Fri, no strength) than the
+            # block default, and one block-level pattern can't express that.
+            # Falls back to the block default when absent, so every existing
+            # sub-phase resolves exactly as before.
+            sp_pattern = sp.get("weekly_day_pattern")
+            if isinstance(sp_pattern, dict) and on.strftime("%a") in sp_pattern:
+                ctx["planned_today"] = sp_pattern[on.strftime("%a")]
             break
 
     return ctx
@@ -265,6 +275,12 @@ def describe(ctx: dict) -> str:
         lines += [f"    - {q}" for q in ctx["quality_sessions"]]
     if ctx.get("constraints"):
         lines.append(f"  constraints: {ctx['constraints']}")
+    # resolve() always copied sub-phase `notes` into ctx, but nothing ever
+    # rendered it -- flagged 2026-08-21, fixed 2026-10-15 when the Lizandro
+    # go/no-go check and race plan lived only in notes and the model never saw
+    # them.
+    if ctx.get("notes"):
+        lines.append(f"  phase notes: {ctx['notes']}")
     if ctx.get("heat_block"):
         hb = ctx["heat_block"]
         desc = hb.get("description") if isinstance(hb, dict) else hb

@@ -1,9 +1,16 @@
 __init__
+app
+backup_status
 config
 daily
+doctor
 garmin
+inbox
 llm
+metrics
 notify
+plan
 prompt
+runtime
 store
 weekly

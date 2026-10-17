@@ -12,13 +12,35 @@ Two changes worth knowing about:
 from datetime import date, timedelta
 
 from .config import CONFIG, project_path
-from . import garmin, store, prompt, llm, notify, plan as planmod, inbox
+from . import garmin, store, prompt, llm, notify, plan as planmod, inbox, runtime, backup_status
 
-BACKFILL_DAYS = 10
+# How far back each run looks for days that were never fetched. Was 10: the
+# Mac was gone from race day (2026-10-03) for 12+ days, and 10 would have
+# silently left the race itself out of the record. A day already fetched on a
+# later date is skipped (store.missing_activity_dates), so a normal morning
+# still fetches only yesterday; the wide window only costs requests when there
+# is a real gap to fill.
+BACKFILL_DAYS = 45
 HISTORY_DAYS = 60   # lookback for the pace/vert-density distance estimate
 
 
-def run(today: date = None):
+class SleepNotSynced(RuntimeError):
+    """Last night isn't in Garmin yet. Raised BEFORE the model call so the app
+    can say "sync your watch and try again" instead of spending minutes
+    reasoning about a night with no data. The 06:30 schedule hit exactly this:
+    it often ran before the watch had synced."""
+
+
+def sleep_synced(m: dict) -> bool:
+    return bool(m.get("sleep_duration_min"))
+
+
+def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
+        progress=lambda step: None):
+    """deliver=True: the CLI path -- send to Telegram, alert on failure.
+    deliver=False: the app path -- return the message; the app shows it and
+    sends to the phone only if asked.
+    require_sleep: stop before the model if last night isn't synced yet."""
     cfg = CONFIG
     db = store.Store(project_path(cfg["paths"]["db"]))
     db.init()
@@ -33,12 +55,15 @@ def run(today: date = None):
     except Exception as e:
         print(f"Telegram ingest skipped: {e}")
 
+    progress("Fetching Garmin data")
     try:
         g = garmin.connect()
         today_raw = garmin.fetch_day(g, today)
         yest_raw = garmin.fetch_day(g, yesterday)
     except Exception as e:
-        notify.send(cfg, f"Montanha coach: Garmin fetch failed today: {e}")
+        if deliver:
+            notify.send(cfg, runtime.failure_message("daily (Garmin fetch)", e))
+            e.notified = True
         raise
 
     m_today = garmin.normalize(today_raw)
@@ -57,8 +82,11 @@ def run(today: date = None):
     # not happened yet, so this fetch proves nothing about the day.
 
     # Recover anything an earlier run missed.
-    for d in db.missing_activity_dates(today - timedelta(days=BACKFILL_DAYS),
-                                       today - timedelta(days=1)):
+    missing = db.missing_activity_dates(today - timedelta(days=BACKFILL_DAYS),
+                                        today - timedelta(days=1))
+    for i, d in enumerate(missing, 1):
+        if len(missing) > 1:
+            progress(f"Catching up missed days from Garmin ({i} of {len(missing)})")
         try:
             raw = garmin.fetch_day(g, d)
             db.upsert_metrics(garmin.normalize(raw))
@@ -68,6 +96,11 @@ def run(today: date = None):
             print(f"Backfilled {d}")
         except Exception as e:
             print(f"Backfill failed for {d}: {e}")
+
+    # After the catch-up, so missed days are recovered even on a morning when
+    # the watch hasn't synced yet.
+    if require_sleep and not sleep_synced(m_today):
+        raise SleepNotSynced("Last night's sleep isn't in Garmin yet.")
 
     recent = db.recent_metrics(cfg.get("context_days", 14), end=today)
     plan_doc = planmod.load(project_path(cfg["paths"]["plan"]))
@@ -95,14 +128,24 @@ def run(today: date = None):
                                       strength_reference=strength_reference,
                                       activity_history=history)
 
+    progress("Thinking (local model)")
     try:
         text = llm.chat(cfg, system, user)
     except Exception as e:
-        notify.send(cfg, f"Montanha coach: model call failed: {e}")
+        if deliver:
+            notify.send(cfg, runtime.failure_message("daily (model call)", e))
+            e.notified = True
         raise
 
     header = llm.parse_header(text)
-    message = (llm.human_part(text) or text) + inbox.PROMPT_FOOTER
+    message = llm.human_part(text) or text
+    if deliver:
+        # The app has its own check-in form and backup banner; the Telegram
+        # path keeps the reply codes and the nudge.
+        message += inbox.PROMPT_FOOTER
+        nudge = backup_status.reminder(cfg)
+        if nudge:
+            message += "\n\n" + nudge
 
     db.add_recommendation(
         today.isoformat(), "daily",
@@ -114,9 +157,12 @@ def run(today: date = None):
         phase_id=ctx.get("phase_id"),
     )
 
+    if not deliver:
+        return {"message": message, "verdict": header.get("VERDICT"),
+                "session": header.get("SESSION")}
     notify.send(cfg, message)
     print(f"Daily recommendation sent ({header.get('VERDICT')}).")
 
 
 if __name__ == "__main__":
-    run()
+    runtime.run_job("daily", run)
