@@ -446,6 +446,110 @@ def test_failure_alert_tells_you_what_to_do():
     assert "setup_garmin_login" in runtime.hint_for(Exception("401 Unauthorized"))
 
 
+# --------------------------------------------------------------------------
+# Nothing left running (2026-10): Ollama lives only as long as the coach
+# --------------------------------------------------------------------------
+
+_CFG = {"model": {"name": "m", "host": "http://localhost:11434"}}
+
+
+class _FakeProc:
+    def __init__(self):
+        self.pid, self._handle, self.alive = 4242, 0, True
+
+    def poll(self):
+        return None if self.alive else 0
+
+    def terminate(self):
+        self.alive = False
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        self.alive = False
+
+
+def _patch_ollama(up_answers, procs, calls):
+    from src import runtime
+    answers = iter(up_answers)
+    saved = (runtime.ollama_up, runtime.find_ollama, runtime.subprocess.Popen,
+             runtime.subprocess.run, runtime._kill_on_close_job, runtime._unload, runtime.time.sleep)
+    runtime.ollama_up = lambda host: next(answers, True)
+    runtime.find_ollama = lambda: "ollama.exe"
+
+    def popen(args, **kw):
+        calls.append(("popen", args, kw["env"]["OLLAMA_HOST"]))
+        procs.append(_FakeProc())
+        return procs[-1]
+    runtime.subprocess.Popen = popen
+    runtime.subprocess.run = lambda *a, **k: (calls.append(("taskkill",)), procs[-1].terminate())
+    runtime._kill_on_close_job = lambda proc: (lambda: (calls.append(("close_job",)), proc.terminate()))
+    runtime._unload = lambda host, model: calls.append(("unload", model))
+    runtime.time.sleep = lambda s: None
+
+    def restore():
+        (runtime.ollama_up, runtime.find_ollama, runtime.subprocess.Popen, runtime.subprocess.run,
+         runtime._kill_on_close_job, runtime._unload, runtime.time.sleep) = saved
+    return restore
+
+
+def test_ollama_already_running_is_left_alone():
+    from src import runtime
+    procs, calls = [], []
+    restore = _patch_ollama([True], procs, calls)
+    try:
+        with runtime.ollama_session(_CFG):
+            pass
+    finally:
+        restore()
+    assert calls == []
+
+
+def test_ollama_started_by_the_coach_is_stopped_afterwards():
+    from src import runtime
+    procs, calls = [], []
+    restore = _patch_ollama([False, True], procs, calls)
+    try:
+        try:
+            with runtime.ollama_session(_CFG):
+                assert procs[0].alive
+                raise RuntimeError("run failed")     # stopped even when the run crashes
+        except RuntimeError:
+            pass
+    finally:
+        restore()
+    assert calls[0] == ("popen", ["ollama.exe", "serve"], "127.0.0.1:11434")
+    assert ("unload", "m") in calls
+    assert not procs[0].alive
+
+
+def test_ollama_on_another_machine_is_never_started():
+    from src import runtime
+    procs, calls = [], []
+    restore = _patch_ollama([False], procs, calls)
+    try:
+        with runtime.ollama_session({"model": {"name": "m", "host": "http://10.0.0.5:11434"}}):
+            pass
+    finally:
+        restore()
+    assert calls == []
+
+
+def test_app_exits_when_idle_or_done_but_never_mid_run():
+    from src import app
+    now = 10_000.0
+    app.QUIT.clear()
+    assert not app.should_exit(now, now - 30, "idle")
+    assert app.should_exit(now, now - app.IDLE_EXIT_SECONDS - 1, "done")
+    assert not app.should_exit(now, now - app.IDLE_EXIT_SECONDS - 1, "running")
+    app.QUIT.set()
+    try:
+        assert app.should_exit(now, now, "idle")
+        assert not app.should_exit(now, now, "running")
+    finally:
+        app.QUIT.clear()
+
+
 def test_backup_reminder_only_after_the_limit():
     from src import backup_status
     cfg = {"backup": {"remind_after_days": 14}}

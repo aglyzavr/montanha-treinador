@@ -6,7 +6,8 @@ Health check: is every piece the morning job needs in place?
 
 Read-only on purpose. It never logs in to Garmin (rule: login happens once, in
 scripts/setup_garmin_login.py) -- it only checks the cached token exists. It
-never prints a secret, only whether it is set.
+never prints a secret, only whether it is set. If Ollama isn't running (the
+normal state) it is started for the model check and stopped again.
 """
 import os
 import sys
@@ -144,15 +145,29 @@ def check_garmin_token():
 
 
 def check_ollama(cfg):
+    """Ollama is normally NOT running (the app starts it on demand), so start
+    it for the check the same way and stop it again afterwards."""
+    from . import runtime
+    exe = runtime.find_ollama()
+    if not exe and not runtime.ollama_up(cfg["model"]["host"]):
+        report(FAIL, "Ollama", "not installed -- run setup.ps1")
+        return
+    was_up = runtime.ollama_up(cfg["model"]["host"])
+    with runtime.ollama_session(cfg):
+        _check_ollama_running(cfg, was_up)
+
+
+def _check_ollama_running(cfg, was_up):
     import requests
     m = cfg["model"]
     host = m["host"].rstrip("/")
     try:
         tags = requests.get(host + "/api/tags", timeout=5).json()
     except Exception:
-        report(FAIL, "Ollama", f"not reachable at {host} -- start the Ollama app")
+        report(FAIL, "Ollama", f"installed but would not start at {host} -- run setup.ps1")
         return
-    report(OK, "Ollama", f"running at {host}")
+    report(OK, "Ollama", f"already running at {host} (started outside the coach)" if was_up
+           else "installed; starts on demand and stops after each run")
     names = {t.get("name") for t in tags.get("models", [])}
     want = m["name"] if ":" in m["name"] else m["name"] + ":latest"
     if want not in names:
@@ -201,6 +216,38 @@ def check_telegram(cfg, send_test):
             report(FAIL, "Telegram test message", redact(str(e)))
 
 
+def check_background(cfg):
+    """Nothing of the coach should run when you aren't using it."""
+    from urllib.parse import urlparse
+    startup = Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
+    autostart = [f.name for f in startup.glob("*") if "ollama" in f.name.lower()] if startup.is_dir() else []
+    if sys.platform == "win32":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+                i = 0
+                while True:
+                    try:
+                        name, val, _ = winreg.EnumValue(k, i)
+                    except OSError:
+                        break
+                    if "ollama" in f"{name} {val}".lower():
+                        autostart.append(f"registry Run: {name}")
+                    i += 1
+        except OSError:
+            pass
+    report(WARN if autostart else OK, "Ollama at login",
+           f"starts at login ({', '.join(autostart)}) -- re-run setup.ps1 to remove"
+           if autostart else "does not start at login")
+    bind = os.environ.get("OLLAMA_HOST", "")
+    host = urlparse(bind if "://" in bind else "http://" + bind).hostname if bind else None
+    if host and host not in ("127.0.0.1", "localhost", "::1"):
+        report(WARN, "OLLAMA_HOST", f"{bind} -- Ollama would be reachable from the network")
+    if urlparse(cfg["model"]["host"]).hostname not in ("127.0.0.1", "localhost", "::1"):
+        report(WARN, "model.host", f"{cfg['model']['host']} is not this PC")
+
+
 def check_backup(cfg):
     from . import backup_status
     last = backup_status.last_backup()
@@ -225,6 +272,7 @@ def main():
     check_data(CONFIG, project_path)
     check_garmin_token()
     check_ollama(CONFIG)
+    check_background(CONFIG)
     check_telegram(CONFIG, send_test)
     check_backup(CONFIG)
     fails, warns = results.count(FAIL), results.count(WARN)

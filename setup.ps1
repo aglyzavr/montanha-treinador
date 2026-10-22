@@ -112,22 +112,24 @@ foreach ($pair in @(@("OLLAMA_FLASH_ATTENTION", "1"), @("OLLAMA_KV_CACHE_TYPE", 
     }
     Set-Item -Path "Env:$($pair[0])" -Value $pair[1]
 }
-if ($restartOllama) {
-    Info "Set OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0; restarting Ollama to apply."
-    Get-Process -Name "ollama*" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Seconds 2
-}
+if ($restartOllama) { Info "Set OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0." }
+# Ollama only runs while the coach does: the app / job starts `ollama serve`
+# and stops it afterwards. Remove the installer's start-at-login shortcut and
+# the tray app, so it isn't listening all day. (Ollama updates: winget upgrade.)
+$startupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) "Ollama.lnk"
+if (Test-Path $startupLnk) { Remove-Item $startupLnk -Force; Info "Ollama no longer starts at login." }
+function Stop-Ollama { Get-Process -Name "ollama*" -ErrorAction SilentlyContinue | Stop-Process -Force }
+Stop-Ollama
+Start-Sleep -Seconds 2
+# Serve just for the model download below, loopback only; stopped at the end of this step.
+$env:OLLAMA_HOST = "127.0.0.1:11434"
+Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden
 $up = $false
-try { Invoke-RestMethod "http://localhost:11434/api/tags" -TimeoutSec 5 | Out-Null; $up = $true } catch {}
-if (-not $up) {
-    $app = "$env:LOCALAPPDATA\Programs\Ollama\ollama app.exe"
-    if (Test-Path $app) { Start-Process $app } else { Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden }
-    for ($i = 0; $i -lt 30 -and -not $up; $i++) {
-        Start-Sleep 2
-        try { Invoke-RestMethod "http://localhost:11434/api/tags" -TimeoutSec 5 | Out-Null; $up = $true } catch {}
-    }
+for ($i = 0; $i -lt 30 -and -not $up; $i++) {
+    Start-Sleep 2
+    try { Invoke-RestMethod "http://localhost:11434/api/tags" -TimeoutSec 5 | Out-Null; $up = $true } catch {}
 }
-if (-not $up) { Warn "Ollama did not start. Open the Ollama app, then re-run setup.ps1."; exit 1 }
+if (-not $up) { Stop-Ollama; Warn "Ollama did not start (see above). Re-run setup.ps1."; exit 1 }
 $model = & $venvPy -c "from src.config import CONFIG; print(CONFIG['model']['name'])"
 $have = (Invoke-RestMethod "http://localhost:11434/api/tags").models.name
 if ($have -contains $model -or $have -contains "$model`:latest") {
@@ -135,8 +137,9 @@ if ($have -contains $model -or $have -contains "$model`:latest") {
 } else {
     Info "Downloading $model (about 22 GB, one time)..."
     ollama pull $model
-    if ($LASTEXITCODE -ne 0) { Warn "Model download failed; re-run setup.ps1 to resume it."; exit 1 }
+    if ($LASTEXITCODE -ne 0) { Stop-Ollama; Warn "Model download failed; re-run setup.ps1 to resume it."; exit 1 }
 }
+Stop-Ollama
 
 # ---------------------------------------------------------------- 6. Garmin
 Step "6/8  Garmin login (once; jobs reuse the cached token)"

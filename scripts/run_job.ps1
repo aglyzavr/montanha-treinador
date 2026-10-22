@@ -25,24 +25,8 @@ if (-not $mutex.WaitOne([TimeSpan]::FromMinutes(90))) {
 }
 
 try {
-    # Ollama's tray app normally starts at login. If it isn't up (e.g. it was
-    # quit), start the server in the background and give it a minute.
-    $up = $false
-    try { Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 | Out-Null; $up = $true } catch {}
-    if (-not $up) {
-        $ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
-        if (-not $ollama) { $ollama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" }
-        if (Test-Path $ollama) {
-            Write-Log "Ollama not running; starting it"
-            Start-Process -FilePath $ollama -ArgumentList "serve" -WindowStyle Hidden
-            for ($i = 0; $i -lt 30 -and -not $up; $i++) {
-                Start-Sleep -Seconds 2
-                try { Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 | Out-Null; $up = $true } catch {}
-            }
-        }
-        # If it still isn't up, the Python job reports it on Telegram.
-    }
-
+    # The Python job starts Ollama itself and stops it when done
+    # (runtime.ollama_session), so nothing is left running afterwards.
     Write-Log "---- $Job start ----"
     $py = "$Root\.venv\Scripts\python.exe"
     $ErrorActionPreference = "Continue"     # Python writes progress to stderr too

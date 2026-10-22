@@ -51,8 +51,17 @@ backup of the old plan.
 | Old terminal way (sends to Telegram) | `.venv\Scripts\python -m src.daily` / `-m src.weekly` |
 | Weekly prompt without the model | `.venv\Scripts\python -m src.weekly --dry-run` |
 
-The app closes itself after 4 hours unused. The model is unloaded right after
-each run, so games get the memory back.
+Nothing of the coach runs in the background. Ollama doesn't start at login
+(setup.ps1 removes its Startup shortcut); the app starts it when you open it
+and, when the app exits, unloads the model and stops Ollama. The app exits when
+you press **Done, close the coach**, or about 3 minutes after you close the
+tab (a run in progress finishes first). Double-click the shortcut to start
+again. The terminal jobs (`-m src.daily` / `-m src.weekly`) do the same.
+Check: `Get-Process ollama*, pythonw` shows nothing once it's closed.
+
+Without the tray app Ollama no longer updates itself; update it now and then
+with `winget upgrade Ollama.Ollama`, then re-run `setup.ps1` (the installer
+puts the Startup shortcut back; `python -m src.doctor` warns if it's there).
 
 ## How this differs from the Mac
 

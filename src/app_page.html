@@ -156,6 +156,11 @@
     </div>
   </section>
 
+  <div class="actions" style="margin-top:28px">
+    <button class="btn secondary" id="quit">Done, close the coach</button>
+    <span class="small" id="quit_text">Stops the coach and the model on this PC. Closing the tab does the same after a few minutes.</span>
+  </div>
+
   <p class="note small" id="footer"></p>
 </main>
 
@@ -276,9 +281,20 @@ async function send(kind, out) {
 $("send").onclick = () => send("daily", $("sent"));
 $("wsend").onclick = () => send("weekly", $("wsent"));
 
+// Heartbeat: while this page is open the app stays up. Once it goes quiet
+// (tab closed) the app stops itself and Ollama with it.
+setInterval(() => api("/api/job").catch(() => {}), 20000);
+$("quit").onclick = async () => {
+  const r = await api("/api/quit", {});
+  if (!r.ok) { $("quit_text").textContent = r.error; return; }
+  document.querySelector("main").innerHTML =
+    "<h1>Coach stopped</h1><p class='small'>Nothing of it is running any more. You can close this tab. "
+    + "Double-click Montanha Coach to start again.</p>";
+};
+
 async function modelState() {
   const s = await api("/api/status");
-  $("model").textContent = !s.ollama.up ? "Ollama isn't running. Open the Ollama app."
+  $("model").textContent = !s.ollama.up ? "Ollama didn't start. Run setup.ps1, or check logs\\app.log."
     : s.ollama.loaded ? "Model ready" : "Loading the model in the background...";
   if (s.ollama.up && !s.ollama.loaded) setTimeout(modelState, 5000);
 }

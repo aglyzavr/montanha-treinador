@@ -17,6 +17,12 @@ Privacy: binds to 127.0.0.1 only -- not reachable from the network. No new
 dependencies (stdlib http.server). The page loads nothing from the internet.
 POSTs need a custom header and a localhost Host, so a web page open in another
 tab can't trigger runs or messages (CSRF / DNS-rebinding guard).
+
+Lifecycle: nothing of the coach stays running in the background. The app
+starts Ollama when it opens (runtime.ollama_session) and, when it exits, unloads
+the model and stops Ollama. It exits when you press "Done" or, after the tab is
+closed, once the page's heartbeat has been silent for IDLE_EXIT_SECONDS (a run
+in progress always finishes first). Double-click the shortcut to start again.
 """
 import json
 import socket
@@ -43,7 +49,9 @@ STATIC = Path(__file__).with_name("static")
 ICONS = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
          "/favicon.svg": ("favicon.svg", "image/svg+xml"),
          "/icon.svg": ("icon.svg", "image/svg+xml")}
-IDLE_EXIT_SECONDS = 4 * 3600      # nobody has used it for 4 h -> exit quietly
+# The open page pings every 20 s. Background tabs are throttled to about one
+# timer per minute, so 3 min of silence means the tab is really gone.
+IDLE_EXIT_SECONDS = 180
 
 FEET_STATES = ("fine", "hotspot", "blister", "pain")
 
@@ -201,7 +209,7 @@ def ollama_state() -> dict:
 
 def warm_model():
     m = CONFIG["model"]
-    payload = {"model": m["name"], "keep_alive": "20m"}
+    payload = {"model": m["name"], "keep_alive": "5m"}
     if m.get("num_ctx"):
         # Must match the real call's num_ctx, or Ollama reloads the model.
         payload["options"] = {"num_ctx": int(m["num_ctx"])}
@@ -261,6 +269,13 @@ def send_to_phone(kind: str) -> str:
 # --------------------------------------------------------------------------
 
 LAST_REQUEST = [time.time()]
+QUIT = threading.Event()
+
+
+def should_exit(now: float, last_request: float, job_state) -> bool:
+    if job_state == "running":
+        return False
+    return QUIT.is_set() or now - last_request > IDLE_EXIT_SECONDS
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -339,6 +354,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok, "error": None if ok else "A run is already in progress."})
             elif self.path == "/api/send":
                 self._json({"ok": True, "message": send_to_phone(body.get("kind", "daily"))})
+            elif self.path == "/api/quit":
+                if JOBS.snapshot().get("state") == "running":
+                    return self._json({"ok": False, "error": "A run is in progress; "
+                                       "it closes by itself when the run is done."})
+                QUIT.set()
+                self._json({"ok": True})
             elif self.path == "/api/warm":
                 threading.Thread(target=warm_model, daemon=True).start()
                 self._json({"ok": True})
@@ -374,22 +395,28 @@ def main():
         webbrowser.open(url)            # second click on the shortcut
         return
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"Montanha coach app on {url}  (Ctrl+C to stop)")
-    if "--no-browser" not in sys.argv:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    print(f"{datetime.now():%Y-%m-%d %H:%M:%S}  Montanha coach app on {url}  (Ctrl+C to stop)")
 
     def idle_watch():
-        while True:
-            time.sleep(300)
-            if (time.time() - LAST_REQUEST[0] > IDLE_EXIT_SECONDS
-                    and JOBS.snapshot().get("state") != "running"):
-                server.shutdown()
-                return
+        while not QUIT.wait(5):
+            if should_exit(time.time(), LAST_REQUEST[0], JOBS.snapshot().get("state")):
+                break
+        while JOBS.snapshot().get("state") == "running":   # "Done" never cuts a run
+            time.sleep(5)
+        server.shutdown()
     threading.Thread(target=idle_watch, daemon=True).start()
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        with runtime.ollama_session(CONFIG):
+            if "--no-browser" not in sys.argv:
+                webbrowser.open(url)
+            LAST_REQUEST[0] = time.time()    # Ollama start-up doesn't count as idle
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+    finally:
+        server.server_close()
+        print(f"{datetime.now():%Y-%m-%d %H:%M:%S}  Montanha coach app stopped")
 
 
 if __name__ == "__main__":

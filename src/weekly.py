@@ -162,4 +162,5 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
 
 if __name__ == "__main__":
     import sys
-    runtime.run_job("weekly", run, dry_run="--dry-run" in sys.argv)
+    dry = "--dry-run" in sys.argv
+    runtime.run_job("weekly", run, dry_run=dry, model=not dry)
