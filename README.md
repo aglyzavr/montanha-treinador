@@ -113,6 +113,10 @@ python scripts/backfill.py --reparse          # no network: re-extracts vert,
 python scripts/backfill.py --fetch 60         # recovers days a missed run lost
 python scripts/backfill.py --details 120      # watch RPE/feel, stamina, run/walk
                                               # split for stored activities
+python scripts/backfill.py --streams 120      # per-second data for runs/hikes of
+                                              # 40+ min -> durability summary
+python scripts/backfill.py --reanalyze        # recompute it after the plan's AeT
+                                              # changes (no network)
 ```
 
 `--reparse` is free and instant — every new metric was already sitting in the

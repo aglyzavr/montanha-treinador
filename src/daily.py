@@ -13,7 +13,7 @@ from datetime import date, timedelta
 
 from .config import CONFIG, project_path
 from . import (garmin, store, prompt, llm, notify, plan as planmod, inbox, runtime,
-               backup_status, metrics, readiness)
+               backup_status, metrics, readiness, streams)
 
 # How far back each run looks for days that were never fetched. Was 10: the
 # Mac was gone from race day (2026-10-03) for 12+ days, and 10 would have
@@ -24,6 +24,7 @@ from . import (garmin, store, prompt, llm, notify, plan as planmod, inbox, runti
 BACKFILL_DAYS = 45
 HISTORY_DAYS = 60   # lookback for the pace/vert-density distance estimate
 READINESS_HISTORY_DAYS = 60   # HRV z-score baseline for the local readiness
+STREAM_LOOKBACK_DAYS = 3      # runs whose per-second data is fetched if missing
 
 
 class SleepNotSynced(RuntimeError):
@@ -179,6 +180,18 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
     principles = prompt.load_principles(project_path(cfg["paths"]["principles"]))
     notes = db.notes_between((today - timedelta(days=7)).isoformat(), today.isoformat())
     ctx = planmod.resolve(plan_doc, today)
+
+    # Per-second data for recent runs: one request each, only for runs/hikes
+    # of 40+ min not fetched yet. Never fatal -- the call works without it.
+    progress("Analysing recent runs")
+    try:
+        streams.sync(g, db, db.activities_between(
+            (today - timedelta(days=STREAM_LOOKBACK_DAYS)).isoformat(), today.isoformat()),
+            streams.aet_from_plan(ctx))
+    except Exception as e:
+        print(f"Run analysis skipped: {e}")
+    # Read yesterday back from the store so each activity carries its analysis.
+    yest_acts = db.activities_between(yesterday.isoformat(), yesterday.isoformat())
 
     # Feeds the distance estimate only. The plan prescribes long runs in time
     # and vert; how many km that comes to depends on this athlete's own pace at

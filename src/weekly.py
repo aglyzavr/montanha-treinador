@@ -16,7 +16,8 @@ import shutil
 from datetime import date, datetime, timedelta
 
 from .config import CONFIG, project_path
-from . import garmin, store, prompt, llm, notify, metrics, plan as planmod, inbox, runtime
+from . import (garmin, store, prompt, llm, notify, metrics, plan as planmod, inbox, runtime,
+               streams)
 
 SCORES_MAX_AGE_DAYS = 14
 PROGRESSION_DAYS = 42      # lift history shown in the review
@@ -88,6 +89,10 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
             zones = garmin.fetch_hr_zones(g)
         except Exception as e:
             print(f"HR zone settings unavailable: {e}")
+        aet = streams.aet_from_plan(planmod.resolve(
+            planmod.load(project_path(cfg["paths"]["plan"])), week_start))
+        streams.sync(g, db, db.activities_between(week_start.isoformat(),
+                                                  week_end.isoformat()), aet)
     except Exception as e:
         print(f"Garmin unavailable, reviewing on stored data only: {e}")
 
@@ -127,6 +132,7 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
         (week_end - timedelta(days=PROGRESSION_DAYS)).isoformat(), week_end.isoformat()))
     summary["movement"] = metrics.movement(week_metrics)
     summary["hr_zones"] = _zones(zones, week_metrics)
+    summary["durability"] = metrics.durability(activities)
 
     principles = prompt.load_principles(project_path(cfg["paths"]["principles"]))
     system, user = prompt.build_weekly(principles, plan_doc, summary, week_metrics,

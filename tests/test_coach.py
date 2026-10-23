@@ -1043,6 +1043,89 @@ def test_weekly_shows_watch_zones_and_flags_a_stale_resting_hr():
     assert "resting HR 53 but measured 7-day is 46" in text
 
 
+# --------------------------------------------------------------------------
+# Phase 3: per-second streams
+# --------------------------------------------------------------------------
+
+from src import streams  # noqa: E402
+
+# Deliberately not in metricsIndex order: Garmin's order differs per activity.
+_KEYS = ["directElevation", "sumDuration", "directHeartRate", "sumDistance",
+         "directGradeAdjustedSpeed", "directSpeed", "directVerticalSpeed",
+         "directDoubleCadence", "directStrideLength", "directAirTemperature"]
+
+
+def _stream(minutes=90, hr=lambda t: 155, gap=lambda t: 3.0, grade=lambda t: 0.0,
+            cadence=170, temp=lambda t: 15):
+    order = [3, 0, 7, 1, 9, 2, 4, 8, 5, 6]
+    rows, ele, dist = [], 100.0, 0.0
+    for t in range(minutes * 60):
+        g = grade(t)
+        speed = gap(t) if g <= 0 else 1.0
+        dist += speed
+        ele += speed * g
+        vals = {"directElevation": ele, "sumDuration": float(t), "directHeartRate": hr(t),
+                "sumDistance": dist, "directGradeAdjustedSpeed": gap(t), "directSpeed": speed,
+                "directVerticalSpeed": speed * g, "directDoubleCadence": cadence,
+                "directStrideLength": 100 - 10 * (t > minutes * 45), "directAirTemperature": temp(t)}
+        row = [None] * len(_KEYS)
+        for k, idx in zip(_KEYS, order):
+            row[idx] = vals[k]
+        rows.append({"metrics": row})
+    return {"metricDescriptors": [{"key": k, "metricsIndex": i} for k, i in zip(_KEYS, order)],
+            "activityDetailMetrics": rows}
+
+
+def test_stream_channels_are_mapped_by_index_not_position():
+    s = streams.decode(_stream(minutes=11))
+    assert s["directHeartRate"][0] == 155 and s["sumDuration"][5] == 5.0
+
+
+def test_a_steady_flat_hour_near_aet_is_read_as_an_aet_test():
+    x = streams.analyze(_stream(), aet_bpm=162)
+    assert x["below_aet_pct"] == 100
+    assert x["aet_test"]["start_min"] == 15 and x["aet_test"]["drift_pct"] == 0.0
+    drifting = streams.analyze(_stream(gap=lambda t: 3.0 if t < 45 * 60 else 2.8), aet_bpm=162)
+    assert 3 < drifting["aet_test"]["drift_pct"] < 8
+
+
+def test_self_paced_hilly_run_gets_no_drift_figure_at_all():
+    hilly = streams.analyze(_stream(grade=lambda t: 0.12 if (t // 600) % 2 else -0.1,
+                                    hr=lambda t: 150 + (t // 600) % 2 * 12), aet_bpm=162)
+    assert "aet_test" not in hilly
+    assert "drift" not in streams.describe({"analysis": hilly})
+    # 1 m/s at 12 % = 432 m/h; the 30 s grade window blurs a few transition samples
+    assert 415 <= hilly["climbs"]["first"]["vam"] <= 432
+    assert hilly["descent"]["min"] >= 5
+
+
+def test_form_and_heat_are_compared_first_vs_last_quarter():
+    x = streams.analyze(_stream(temp=lambda t: 15 if t < 2700 else 25), aet_bpm=162)
+    assert x["form_q1_q4"]["stride_cm"] == [100, 90] and x["temp_q1_q4"] == [15, 25]
+    assert "stride cm 100->90" in streams.describe({"analysis": x})
+
+
+def test_without_a_plan_aet_nothing_is_judged_against_aet():
+    x = streams.analyze(_stream(), aet_bpm=None)
+    assert "below_aet_pct" not in x and "aet_test" not in x
+    assert streams.aet_from_plan({"hr_zones": {"z2_upper_aerobic_bpm": [150, 162]}}) == 162
+    assert streams.aet_from_plan({}) is None
+
+
+def test_analysis_survives_activity_reparse(tmp_path=None):
+    import tempfile
+    from src import store
+    db = store.Store(Path(tmp_path or tempfile.mkdtemp()) / "t.db")
+    db.init()
+    a = {"id": "7", "date": "2026-10-18", "type": "trail_running", "duration_min": 90}
+    db.upsert_activity(a)
+    db.save_analysis("7", 162, {"below_aet_pct": 85, "aet_bpm": 162, "duration_min": 90})
+    db.upsert_activity(dict(a, name="re-parsed"))            # INSERT OR REPLACE
+    row = db.activities_between("2026-10-18", "2026-10-18")[0]
+    assert row["name"] == "re-parsed" and row["analysis"]["below_aet_pct"] == 85
+    assert metrics.durability([row])["below_aet_pct"] == 85
+
+
 if __name__ == "__main__":
     fails = []
     for name, fn in sorted(globals().items()):

@@ -84,6 +84,21 @@ CREATE TABLE IF NOT EXISTS activity_fetch (
   date TEXT PRIMARY KEY,
   fetched_at TEXT
 );
+-- Per-second activity data (gzipped JSON, ~0.2-0.7 MB per run) and the
+-- summary computed from it. Separate from `activities` on purpose: activity
+-- rows are INSERT OR REPLACEd by every fetch and --reparse, which would wipe
+-- any column normalize() doesn't produce.
+CREATE TABLE IF NOT EXISTS activity_streams (
+  id TEXT PRIMARY KEY,
+  fetched_at TEXT,
+  gz BLOB
+);
+CREATE TABLE IF NOT EXISTS activity_analysis (
+  id TEXT PRIMARY KEY,
+  aet_bpm INTEGER,
+  summary_json TEXT,
+  analyzed_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_activities_date ON activities(date);
 CREATE INDEX IF NOT EXISTS idx_manual_notes_date ON manual_notes(date);
 """
@@ -238,6 +253,28 @@ class Store:
     def upsert_scores(self, s: dict):
         self._upsert("fitness_scores", _SCORE_COLS, s)
 
+    def save_stream(self, activity_id, gz: bytes):
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO activity_streams (id, fetched_at, gz) "
+                      "VALUES (?,?,?)", (str(activity_id), _now(), gz))
+
+    def get_stream(self, activity_id):
+        with self._conn() as c:
+            r = c.execute("SELECT gz FROM activity_streams WHERE id = ?",
+                          (str(activity_id),)).fetchone()
+        return r["gz"] if r else None
+
+    def stream_ids(self) -> set:
+        with self._conn() as c:
+            return {r["id"] for r in c.execute("SELECT id FROM activity_streams")}
+
+    def save_analysis(self, activity_id, aet_bpm, summary: dict):
+        import json
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO activity_analysis "
+                      "(id, aet_bpm, summary_json, analyzed_at) VALUES (?,?,?,?)",
+                      (str(activity_id), aet_bpm, json.dumps(summary), _now()))
+
     def add_recommendation(self, d, kind, plan_week, session_type, text, model,
                            session_detail=None, phase_id=None):
         with self._conn() as c:
@@ -311,12 +348,22 @@ class Store:
         return [dict(r) for r in rows]
 
     def activities_between(self, start: str, end: str):
+        """Activity rows, each with its per-second `analysis` dict (or None)."""
+        import json
         with self._conn() as c:
             rows = c.execute(
-                "SELECT * FROM activities WHERE date >= ? AND date <= ? ORDER BY date, start_local",
+                "SELECT a.*, x.summary_json AS analysis_json FROM activities a "
+                "LEFT JOIN activity_analysis x ON x.id = a.id "
+                "WHERE a.date >= ? AND a.date <= ? ORDER BY a.date, a.start_local",
                 (start, end),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            a = dict(r)
+            raw = a.pop("analysis_json", None)
+            a["analysis"] = json.loads(raw) if raw else None
+            out.append(a)
+        return out
 
     def recommendations_between(self, start: str, end: str, kind="daily"):
         with self._conn() as c:

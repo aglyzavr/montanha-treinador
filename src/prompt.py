@@ -13,6 +13,7 @@ from . import llm
 from . import plan as planmod
 from . import metrics as metricsmod
 from . import readiness as readinessmod
+from . import streams as streamsmod
 
 
 def load_principles(path: str) -> str:
@@ -621,10 +622,13 @@ def _fmt_activities(acts: list) -> str:
             bits.append(f"stamina {round(a['stamina_start'])}->{round(a['stamina_end'])}")
         if a.get("walk_gain_m") and a.get("run_gain_m") is not None:
             bits.append(f"climbing: ran {round(a['run_gain_m'])}m / hiked "
-                        f"{round(a['walk_gain_m'])}m ({a.get('walk_min')} min hiking)")
+                        f"{round(a['walk_gain_m'])}m ({round(a.get('walk_min') or 0)} min hiking)")
         strength = metricsmod.describe_strength(a)
         if strength:
             bits.append("-- " + strength)
+        analysed = streamsmod.describe(a)
+        if analysed:
+            bits.append("\n      per-second: " + analysed)
         lines.append(" ".join(bits))
     return "\n".join(lines)
 

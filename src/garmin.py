@@ -119,6 +119,13 @@ def with_details(g: Client, acts):
     return acts
 
 
+def fetch_stream(g: Client, activity_id) -> dict:
+    """~1 point per second, 26 channels (see src/streams.py). 0.2-0.7 MB gzipped.
+    Without maxChartSize Garmin silently downsamples to ~270 points."""
+    return g.get(f"/activity-service/activity/{activity_id}/details",
+                 {"maxChartSize": 100000, "maxPolylineSize": 0})
+
+
 def fetch_hr_zones(g: Client) -> dict:
     """The RUNNING heart-rate zones configured on the watch (zone time in every
     activity is counted against these)."""

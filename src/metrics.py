@@ -192,6 +192,29 @@ def movement(week_metrics: list) -> dict | None:
     }
 
 
+def durability(activities: list) -> dict | None:
+    """The week's per-second analyses: time-weighted share of HR time at or
+    below the plan's AeT, the long runs in detail, and any AeT-test segment."""
+    from . import streams
+    done = [a for a in activities if a.get("analysis")]
+    if not done:
+        return None
+    timed = [(a["analysis"]["duration_min"], a["analysis"]["below_aet_pct"]) for a in done
+             if a["analysis"].get("below_aet_pct") is not None]
+    mins = sum(m for m, _ in timed)
+    return {
+        "analysed": len(done),
+        "aet_bpm": next((a["analysis"].get("aet_bpm") for a in done
+                         if a["analysis"].get("aet_bpm")), None),
+        "below_aet_pct": round(sum(m * p for m, p in timed) / mins) if mins else None,
+        "long_runs": [f"{a['date']} \"{a.get('name')}\" {round(_f(a.get('duration_min')))} min: "
+                      + streams.describe(a) for a in done
+                      if _f(a.get("duration_min")) >= LONG_RUN_MIN],
+        "aet_tests": [f"{a['date']}: " + streams.describe({"analysis": {"aet_test": a["analysis"]["aet_test"]}})
+                      for a in done if a["analysis"].get("aet_test")],
+    }
+
+
 def _start_hour(a):
     s = a.get("start_local")
     if not isinstance(s, str):
@@ -522,6 +545,22 @@ def describe(s: dict, gaps: list = None, notes: list = None,
         L.append(f"  steps {mv['steps']:,} (avg {mv['steps'] // mv['days']:,}/day), "
                  f"climbed {mv['floors_up_m']} m / descended {mv['floors_down_m']} m on foot, "
                  f"intensity minutes {mv['moderate_min']} moderate / {mv['vigorous_min']} vigorous")
+
+    du = s.get("durability")
+    if du:
+        L.append("")
+        L.append(f"DURABILITY (per-second data, {du['analysed']} runs/hikes analysed)")
+        if du.get("below_aet_pct") is not None:
+            L.append(f"  time at or below the plan's AeT ({du['aet_bpm']} bpm): "
+                     f"{du['below_aet_pct']}% of HR time -- the real 'easy' share")
+        for line in du["long_runs"]:
+            L.append(f"  {line}")
+        if du["aet_tests"]:
+            for line in du["aet_tests"]:
+                L.append(f"  {line}")
+        else:
+            L.append("  no AeT-test segment this week (whole-run HR drift on self-paced "
+                     "runs is not a valid AeT measure and is not computed)")
 
     z = s.get("hr_zones")
     if z:

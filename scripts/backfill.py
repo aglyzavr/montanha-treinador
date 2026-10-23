@@ -19,6 +19,11 @@ Two independent jobs:
               run / walk split) for the last N days, where it is missing. One
               request per activity, paced 1/s.
 
+  --streams N Fetches per-second data for runs/hikes of 40+ min in the last N
+              days and computes the durability summary (src/streams.py).
+              --reanalyze recomputes every stored stream, e.g. after the plan's
+              AeT changes. No network.
+
 (Garmin's weekly fitness scores used to come with --scores; the Personal API
 doesn't have them, so stored ones are only re-read by --reparse.)
 
@@ -27,6 +32,8 @@ Usage:
     python scripts/backfill.py --fetch 60
     python scripts/backfill.py --reparse --fetch 60
     python scripts/backfill.py --details 120
+    python scripts/backfill.py --streams 120
+    python scripts/backfill.py --reanalyze
 """
 import argparse
 import json
@@ -38,7 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import CONFIG, project_path  # noqa: E402
-from src import garmin, store  # noqa: E402
+from src import garmin, store, streams, plan as planmod  # noqa: E402
 
 
 def reparse(db) -> tuple:
@@ -124,6 +131,11 @@ def fetch_details(db, days: int) -> int:
     return done
 
 
+def _plan_aet():
+    return streams.aet_from_plan(planmod.resolve(
+        planmod.load(project_path(CONFIG["paths"]["plan"])), date.today()))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -131,11 +143,15 @@ def main():
                     help="re-extract new columns from stored raw_json (no network)")
     ap.add_argument("--fetch", type=int, metavar="DAYS",
                     help="fetch missing days from the last DAYS days")
+    ap.add_argument("--streams", type=int, metavar="DAYS",
+                    help="fetch + analyse per-second data for runs in the last DAYS days")
+    ap.add_argument("--reanalyze", action="store_true",
+                    help="recompute every stored stream with the plan's current AeT (no network)")
     ap.add_argument("--details", type=int, metavar="DAYS",
                     help="fetch activity detail (RPE, stamina, run/walk) for the last DAYS days")
     args = ap.parse_args()
 
-    if not (args.reparse or args.fetch or args.details):
+    if not (args.reparse or args.fetch or args.details or args.streams or args.reanalyze):
         ap.print_help()
         return
 
@@ -156,6 +172,20 @@ def main():
     if args.details:
         print(f"Fetching activity detail (last {args.details} days)...")
         print(f"  updated {fetch_details(db, args.details)} activities")
+
+    if args.streams:
+        start = (date.today() - timedelta(days=args.streams)).isoformat()
+        acts = db.activities_between(start, date.today().isoformat())
+        todo = [a for a in acts if streams.wants_stream(a)
+                and str(a["id"]) not in db.stream_ids()]
+        print(f"Fetching per-second data for {len(todo)} runs/hikes (~{len(todo)} s)...")
+        n = streams.sync(garmin.connect(), db, todo, _plan_aet(), pace_s=1)
+        print(f"  analysed {n}")
+
+    if args.reanalyze:
+        aet = _plan_aet()
+        print(f"Re-analysing stored streams with AeT {aet}...")
+        print(f"  updated {streams.reanalyze(db, aet)}")
 
 
 if __name__ == "__main__":
