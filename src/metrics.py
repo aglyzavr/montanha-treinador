@@ -25,7 +25,7 @@ Uphill-specific metrics, and why each one is here:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 # A run counts as "long" at 90+ minutes; b2b pairs are what build ultra
 # durability, so the threshold is deliberately reachable rather than heroic.
@@ -213,6 +213,97 @@ def durability(activities: list) -> dict | None:
         "aet_tests": [f"{a['date']}: " + streams.describe({"analysis": {"aet_test": a["analysis"]["aet_test"]}})
                       for a in done if a["analysis"].get("aet_test")],
     }
+
+
+WEIGHT_DROP_PCT = 1.5      # 7-day avg vs 4 weeks earlier: possible under-fuelling
+WEIGHT_STALE_DAYS = 10
+SWEAT_MIN_RUN_MIN = 60
+SWEAT_PRE_H, SWEAT_POST_H = 2, 1
+
+
+def _morning_weights(weights: list) -> dict:
+    """{date: kg} using each day's FIRST weigh-in -- mornings are comparable,
+    a post-run weigh-in is not."""
+    out = {}
+    for w in sorted(weights, key=lambda w: (w["date"], w.get("time_gmt_ms") or 0)):
+        out.setdefault(w["date"], w["kg"])
+    return out
+
+
+def weight_trend(weights: list, end: date) -> dict | None:
+    daily = _morning_weights(weights)
+    if not daily:
+        return None
+
+    def avg(lo, hi):
+        vals = [kg for d, kg in daily.items()
+                if (end - timedelta(days=hi)).isoformat() <= d <= (end - timedelta(days=lo)).isoformat()]
+        return round(sum(vals) / len(vals), 1) if vals else None
+
+    last_date = max(daily)
+    now, before = avg(0, 6), avg(28, 34)
+    out = {"latest_date": last_date, "latest_kg": daily[last_date], "avg7_kg": now,
+           "avg7_4wk_ago_kg": before,
+           "weigh_ins_28d": sum(1 for d in daily if d >= (end - timedelta(days=27)).isoformat()),
+           "stale_days": (end - date.fromisoformat(last_date)).days}
+    if now and before:
+        out["change_kg"] = round(now - before, 1)
+        out["change_pct"] = round(100 * (now - before) / before, 1)
+        out["dropping"] = out["change_pct"] <= -WEIGHT_DROP_PCT
+    return out
+
+
+def _start_gmt_ms(a):
+    import json
+    try:
+        s = json.loads(a.get("raw_json") or "{}").get("startTimeGMT")
+        return datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp() * 1000
+    except (TypeError, ValueError):
+        return None
+
+
+def sweat_tests(weights: list, activities: list) -> list:
+    """A weigh-in up to 2 h before and up to 1 h after a 60+ min run gives the
+    sweat rate. Fluid drunk during the run is not known, so it is a floor."""
+    out = []
+    timed = [w for w in weights if w.get("time_gmt_ms")]
+    for a in activities:
+        dur = _f(a.get("duration_min"))
+        start = _start_gmt_ms(a)
+        if not (_is_run(a) or a.get("type") == "hiking") or dur < SWEAT_MIN_RUN_MIN or not start:
+            continue
+        end = start + dur * 60_000
+        pre = [w for w in timed if start - SWEAT_PRE_H * 3_600_000 <= w["time_gmt_ms"] <= start]
+        post = [w for w in timed if end <= w["time_gmt_ms"] <= end + SWEAT_POST_H * 3_600_000]
+        if pre and post:
+            loss = pre[-1]["kg"] - post[0]["kg"]
+            out.append({"date": a["date"], "name": a.get("name"), "duration_min": round(dur),
+                        "max_temp_c": a.get("max_temp_c"), "loss_kg": round(loss, 2),
+                        "l_per_h": round(loss / (dur / 60), 2)})
+    return out
+
+
+def describe_weight(trend: dict | None, sweat: list = None) -> list:
+    """Prompt lines; [] when nothing has been weighed."""
+    if not trend:
+        return []
+    L = [f"  weight: {trend['latest_kg']} kg on {trend['latest_date']}"
+         + (f", 7-day avg {trend['avg7_kg']}" if trend.get("avg7_kg") else "")
+         + (f", {trend['change_kg']:+} kg ({trend['change_pct']:+}%) vs 4 weeks earlier"
+            if trend.get("change_kg") is not None else ", no 4-week comparison yet")
+         + f" [{trend['weigh_ins_28d']} weigh-in{'s' if trend['weigh_ins_28d'] != 1 else ''}"
+           " in 28 days]"]
+    if trend.get("dropping"):
+        L.append(f"  WEIGHT DROPPING {abs(trend['change_pct'])}% in 4 weeks: possible under-fuelling "
+                 "for the training load -- ask about eating and recovery before adding volume")
+    if trend["stale_days"] > WEIGHT_STALE_DAYS:
+        L.append(f"  last weigh-in {trend['stale_days']} days ago -- trend may be out of date")
+    for s in sweat or []:
+        L.append(f"  sweat test {s['date']} \"{s['name']}\" {s['duration_min']} min"
+                 + (f" ({round(s['max_temp_c'])}C)" if s.get("max_temp_c") is not None else "")
+                 + f": lost {s['loss_kg']} kg = at least {s['l_per_h']} L/h "
+                 "(plus whatever was drunk during the run)")
+    return L
 
 
 def _start_hour(a):
@@ -545,6 +636,12 @@ def describe(s: dict, gaps: list = None, notes: list = None,
         L.append(f"  steps {mv['steps']:,} (avg {mv['steps'] // mv['days']:,}/day), "
                  f"climbed {mv['floors_up_m']} m / descended {mv['floors_down_m']} m on foot, "
                  f"intensity minutes {mv['moderate_min']} moderate / {mv['vigorous_min']} vigorous")
+
+    weight = describe_weight(s.get("weight"), s.get("sweat_tests"))
+    if weight:
+        L.append("")
+        L.append("WEIGHT (Garmin weigh-ins; first weigh-in of each day)")
+        L.extend(weight)
 
     du = s.get("durability")
     if du:

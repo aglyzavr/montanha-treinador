@@ -117,6 +117,8 @@ python scripts/backfill.py --streams 120      # per-second data for runs/hikes o
                                               # 40+ min -> durability summary
 python scripts/backfill.py --reanalyze        # recompute it after the plan's AeT
                                               # changes (no network)
+python scripts/backfill.py --weights 365      # Garmin weigh-ins (Index scale or
+                                              # entered in the Connect app)
 ```
 
 `--reparse` is free and instant — every new metric was already sitting in the

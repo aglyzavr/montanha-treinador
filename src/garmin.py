@@ -126,6 +126,45 @@ def fetch_stream(g: Client, activity_id) -> dict:
                  {"maxChartSize": 100000, "maxPolylineSize": 0})
 
 
+def fetch_weights(g: Client, start: date, end: date) -> list:
+    """Weigh-ins (Index scale or entered in the Connect app) in [start, end]."""
+    return normalize_weights(g.get(
+        f"/weight-service/weight/range/{start.isoformat()}/{end.isoformat()}",
+        {"includeAll": "true"}))
+
+
+def normalize_weights(payload) -> list:
+    """One row per weigh-in. Garmin reports weight in grams."""
+    import json
+    out = []
+    for day in (payload or {}).get("dailyWeightSummaries") or []:
+        if not isinstance(day, dict):
+            continue
+        samples = [m for m in day.get("allWeightMetrics") or [day.get("latestWeight")]
+                   if isinstance(m, dict)]
+        # A weigh-in that updates the profile weight also comes back as a
+        # CHANGE_LOG sample with the same value: a duplicate, unless it's the
+        # only weight that day (profile weight edited in settings).
+        real = [m for m in samples if m.get("sourceType") != "CHANGE_LOG"]
+        for m in real or samples:
+            w = _num((m or {}).get("weight"))
+            if w is None:
+                continue
+            d = m.get("calendarDate") or day.get("summaryDate")
+            ts = _num(m.get("timestampGMT")) or _gmt_ms(m.get("timestampGMT")) or _num(m.get("date"))
+            fat = _num(m.get("bodyFat"))
+            out.append({
+                "sample_id": str(m.get("samplePk") or f"{d}-{ts}"),
+                "date": d,
+                "time_gmt_ms": int(ts) if ts else None,
+                "kg": round(w / 1000, 2) if w > 500 else round(w, 2),
+                "body_fat_pct": fat,
+                "source": m.get("sourceType"),
+                "raw_json": json.dumps(m, default=str),
+            })
+    return out
+
+
 def fetch_hr_zones(g: Client) -> dict:
     """The RUNNING heart-rate zones configured on the watch (zone time in every
     activity is counted against these)."""

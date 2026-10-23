@@ -25,6 +25,7 @@ BACKFILL_DAYS = 45
 HISTORY_DAYS = 60   # lookback for the pace/vert-density distance estimate
 READINESS_HISTORY_DAYS = 60   # HRV z-score baseline for the local readiness
 STREAM_LOOKBACK_DAYS = 3      # runs whose per-second data is fetched if missing
+WEIGHT_HISTORY_DAYS = 40      # 7-day average now vs 4 weeks earlier
 
 
 class SleepNotSynced(RuntimeError):
@@ -193,6 +194,17 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
     # Read yesterday back from the store so each activity carries its analysis.
     yest_acts = db.activities_between(yesterday.isoformat(), yesterday.isoformat())
 
+    # Weigh-ins: one request for the last two weeks (catches late syncs).
+    try:
+        for w in garmin.fetch_weights(g, today - timedelta(days=14), today):
+            db.upsert_weight(w)
+    except Exception as e:
+        print(f"Weigh-ins skipped: {e}")
+    weights = db.weights_between((today - timedelta(days=WEIGHT_HISTORY_DAYS)).isoformat(),
+                                 today.isoformat())
+    weight_lines = metrics.describe_weight(metrics.weight_trend(weights, today),
+                                           metrics.sweat_tests(weights, yest_acts))
+
     # Feeds the distance estimate only. The plan prescribes long runs in time
     # and vert; how many km that comes to depends on this athlete's own pace at
     # this athlete's own vert density, so it is derived from their history and
@@ -231,7 +243,8 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
                                       readiness_trend=readiness_trend,
                                       yesterday_metrics=m_yest,
                                       recent_activities=recent_acts,
-                                      last_strength_activity=last_strength_activity)
+                                      last_strength_activity=last_strength_activity,
+                                      weight_lines=weight_lines)
 
     progress("Thinking (local model)")
     try:

@@ -19,6 +19,8 @@ Two independent jobs:
               run / walk split) for the last N days, where it is missing. One
               request per activity, paced 1/s.
 
+  --weights N Pulls Garmin weigh-ins for the last N days.
+
   --streams N Fetches per-second data for runs/hikes of 40+ min in the last N
               days and computes the durability summary (src/streams.py).
               --reanalyze recomputes every stored stream, e.g. after the plan's
@@ -34,6 +36,7 @@ Usage:
     python scripts/backfill.py --details 120
     python scripts/backfill.py --streams 120
     python scripts/backfill.py --reanalyze
+    python scripts/backfill.py --weights 365
 """
 import argparse
 import json
@@ -131,6 +134,9 @@ def fetch_details(db, days: int) -> int:
     return done
 
 
+WEIGHT_CHUNK_DAYS = 90
+
+
 def _plan_aet():
     return streams.aet_from_plan(planmod.resolve(
         planmod.load(project_path(CONFIG["paths"]["plan"])), date.today()))
@@ -145,13 +151,16 @@ def main():
                     help="fetch missing days from the last DAYS days")
     ap.add_argument("--streams", type=int, metavar="DAYS",
                     help="fetch + analyse per-second data for runs in the last DAYS days")
+    ap.add_argument("--weights", type=int, metavar="DAYS",
+                    help="fetch Garmin weigh-ins for the last DAYS days")
     ap.add_argument("--reanalyze", action="store_true",
                     help="recompute every stored stream with the plan's current AeT (no network)")
     ap.add_argument("--details", type=int, metavar="DAYS",
                     help="fetch activity detail (RPE, stamina, run/walk) for the last DAYS days")
     args = ap.parse_args()
 
-    if not (args.reparse or args.fetch or args.details or args.streams or args.reanalyze):
+    if not (args.reparse or args.fetch or args.details or args.streams or args.reanalyze
+            or args.weights):
         ap.print_help()
         return
 
@@ -181,6 +190,18 @@ def main():
         print(f"Fetching per-second data for {len(todo)} runs/hikes (~{len(todo)} s)...")
         n = streams.sync(garmin.connect(), db, todo, _plan_aet(), pace_s=1)
         print(f"  analysed {n}")
+
+    if args.weights:
+        g, n, end = garmin.connect(), 0, date.today()
+        while end > date.today() - timedelta(days=args.weights):
+            start = max(end - timedelta(days=WEIGHT_CHUNK_DAYS - 1),
+                        date.today() - timedelta(days=args.weights))
+            for w in garmin.fetch_weights(g, start, end):
+                db.upsert_weight(w)
+                n += 1
+            end = start - timedelta(days=1)
+            time.sleep(1)
+        print(f"Weigh-ins: stored {n}")
 
     if args.reanalyze:
         aet = _plan_aet()

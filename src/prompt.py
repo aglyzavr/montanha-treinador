@@ -694,7 +694,8 @@ def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
                 activity_history=None, strength_status=None,
                 last_strength_note=None, readiness=None, acwr=None,
                 readiness_trend=None, yesterday_metrics=None,
-                recent_activities=None, last_strength_activity=None):
+                recent_activities=None, last_strength_activity=None,
+                weight_lines=None):
     today = today or date.today()
     ctx = planmod.resolve(plan_doc, today)
     system = principles + "\n\n---\n" + OUTPUT_CONTRACT
@@ -717,6 +718,8 @@ from here, do not invent)
 {strength_reference}
 """ if due else ""
 
+    weight_block = "".join("\n" + line for line in weight_lines or [])
+
     user = f"""Today is {today.isoformat()} ({today.strftime('%A')}).
 
 PLAN CONTEXT (resolved from your plan -- these are facts, not estimates)
@@ -725,7 +728,7 @@ PLAN CONTEXT (resolved from your plan -- these are facts, not estimates)
 {prescription_block}{strength_block}
 LAST NIGHT / TODAY'S RECOVERY
 {_fmt_metrics(today_metrics)}
-{readinessmod.describe(readiness)}{_fmt_acwr(acwr)}
+{readinessmod.describe(readiness)}{_fmt_acwr(acwr)}{weight_block}
 
 YESTERDAY'S TRAINING
 {_fmt_activities(yesterday_activities)}{_fmt_movement(yesterday_metrics)}{_fmt_recent_strength(recent_activities, today)}

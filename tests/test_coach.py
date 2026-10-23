@@ -1126,6 +1126,66 @@ def test_analysis_survives_activity_reparse(tmp_path=None):
     assert metrics.durability([row])["below_aet_pct"] == 85
 
 
+# --------------------------------------------------------------------------
+# Weight: trend and sweat rate
+# --------------------------------------------------------------------------
+
+def _weigh(d, kg, hhmm="07:00"):
+    from datetime import timezone
+    ts = datetime.fromisoformat(f"{d}T{hhmm}").replace(tzinfo=timezone.utc).timestamp() * 1000
+    return {"sample_id": f"{d}-{hhmm}", "date": d, "time_gmt_ms": int(ts), "kg": kg}
+
+
+def test_weigh_ins_are_read_in_kg_from_grams():
+    rows = garmin.normalize_weights({"dailyWeightSummaries": [{
+        "summaryDate": "2026-10-23",
+        "allWeightMetrics": [{"samplePk": 9, "calendarDate": "2026-10-23",
+                              "weight": 71250.0, "timestampGMT": 1792738800000,
+                              "sourceType": "MANUAL"}]}]})
+    assert rows[0]["kg"] == 71.25 and rows[0]["sample_id"] == "9"
+    assert garmin.normalize_weights({"dailyWeightSummaries": []}) == []
+
+
+def test_profile_change_log_is_not_a_second_weigh_in():
+    day = {"summaryDate": "2026-10-23", "allWeightMetrics": [
+        {"samplePk": 1, "calendarDate": "2026-10-23", "weight": 69000.0,
+         "timestampGMT": 1792757400378, "sourceType": "MANUAL"},
+        {"samplePk": 2, "calendarDate": "2026-10-23", "weight": 69000.0,
+         "timestampGMT": 1792757305000, "sourceType": "CHANGE_LOG"}]}
+    rows = garmin.normalize_weights({"dailyWeightSummaries": [day]})
+    assert [r["source"] for r in rows] == ["MANUAL"]
+    only_log = dict(day, allWeightMetrics=day["allWeightMetrics"][1:])
+    assert len(garmin.normalize_weights({"dailyWeightSummaries": [only_log]})) == 1
+
+
+def test_weight_trend_uses_mornings_and_flags_a_drop():
+    end = date(2026, 10, 23)
+    ws = [_weigh((end - timedelta(days=d)).isoformat(), 72.0) for d in range(28, 35)]
+    ws += [_weigh((end - timedelta(days=d)).isoformat(), 70.6) for d in range(0, 7)]
+    ws.append(_weigh(end.isoformat(), 69.0, "12:00"))        # post-run, ignored
+    t = metrics.weight_trend(ws, end)
+    assert t["avg7_kg"] == 70.6 and t["change_kg"] == -1.4 and t["dropping"]
+    assert any("WEIGHT DROPPING" in line for line in metrics.describe_weight(t))
+
+
+def test_sweat_rate_needs_a_weigh_in_on_both_sides_of_the_run():
+    run = {"date": "2026-10-18", "type": "trail_running", "name": "Sintra",
+           "duration_min": 120, "max_temp_c": 27,
+           "raw_json": json.dumps({"startTimeGMT": "2026-10-18 08:00:00"})}
+    ws = [_weigh("2026-10-18", 71.0, "07:30"), _weigh("2026-10-18", 69.4, "10:20")]
+    s = metrics.sweat_tests(ws, [run])
+    assert s == [{"date": "2026-10-18", "name": "Sintra", "duration_min": 120,
+                  "max_temp_c": 27, "loss_kg": 1.6, "l_per_h": 0.8}]
+    assert metrics.sweat_tests(ws[:1], [run]) == []
+    assert "at least 0.8 L/h" in metrics.describe_weight(metrics.weight_trend(ws, date(2026, 10, 18)), s)[-1]
+
+
+def test_no_weigh_ins_adds_nothing_to_the_prompt():
+    assert metrics.describe_weight(None) == []
+    _, user = prompt.build_daily("p", {}, {}, [], [], today=date(2026, 10, 20), weight_lines=[])
+    assert "weight:" not in user
+
+
 if __name__ == "__main__":
     fails = []
     for name, fn in sorted(globals().items()):

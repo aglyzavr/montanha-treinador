@@ -99,6 +99,17 @@ CREATE TABLE IF NOT EXISTS activity_analysis (
   summary_json TEXT,
   analyzed_at TEXT
 );
+-- Weigh-ins from Garmin (Index scale or entered in the Connect app). Several
+-- a day are kept: a weigh-in before and after a run gives the sweat rate.
+CREATE TABLE IF NOT EXISTS weights (
+  sample_id TEXT PRIMARY KEY,
+  date TEXT,
+  time_gmt_ms INTEGER,
+  kg REAL,
+  body_fat_pct REAL,
+  source TEXT,
+  raw_json TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_activities_date ON activities(date);
 CREATE INDEX IF NOT EXISTS idx_manual_notes_date ON manual_notes(date);
 """
@@ -196,6 +207,8 @@ _ACTIVITY_COLS = [
     "stamina_start", "stamina_end", "run_min", "walk_min", "run_gain_m",
     "walk_gain_m", "strength_sets_json", "raw_json",
 ]
+_WEIGHT_COLS = ["sample_id", "date", "time_gmt_ms", "kg", "body_fat_pct", "source",
+                "raw_json"]
 _SCORE_COLS = [
     "date", "hill_score", "hill_strength", "hill_endurance", "endurance_score",
     "vo2max", "training_status", "acute_load", "chronic_load", "acwr",
@@ -252,6 +265,15 @@ class Store:
 
     def upsert_scores(self, s: dict):
         self._upsert("fitness_scores", _SCORE_COLS, s)
+
+    def upsert_weight(self, w: dict):
+        self._upsert("weights", _WEIGHT_COLS, w)
+
+    def weights_between(self, start: str, end: str):
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM weights WHERE date >= ? AND date <= ? "
+                             "ORDER BY date, time_gmt_ms", (start, end)).fetchall()
+        return [dict(r) for r in rows]
 
     def save_stream(self, activity_id, gz: bytes):
         with self._conn() as c:

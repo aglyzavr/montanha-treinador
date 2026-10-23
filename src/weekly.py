@@ -93,6 +93,8 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
             planmod.load(project_path(cfg["paths"]["plan"])), week_start))
         streams.sync(g, db, db.activities_between(week_start.isoformat(),
                                                   week_end.isoformat()), aet)
+        for w in garmin.fetch_weights(g, week_end - timedelta(days=40), week_end):
+            db.upsert_weight(w)
     except Exception as e:
         print(f"Garmin unavailable, reviewing on stored data only: {e}")
 
@@ -133,6 +135,10 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
     summary["movement"] = metrics.movement(week_metrics)
     summary["hr_zones"] = _zones(zones, week_metrics)
     summary["durability"] = metrics.durability(activities)
+    weights = db.weights_between((week_end - timedelta(days=40)).isoformat(),
+                                 week_end.isoformat())
+    summary["weight"] = metrics.weight_trend(weights, week_end)
+    summary["sweat_tests"] = metrics.sweat_tests(weights, activities)
 
     principles = prompt.load_principles(project_path(cfg["paths"]["principles"]))
     system, user = prompt.build_weekly(principles, plan_doc, summary, week_metrics,
