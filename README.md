@@ -110,7 +110,9 @@ source .venv/bin/activate
 python scripts/backfill.py --reparse          # no network: re-extracts vert,
                                               # HR zones, cadence, temperature
                                               # etc. from payloads already saved
-python scripts/backfill.py --fetch 60 --scores  # recovers days a missed run lost
+python scripts/backfill.py --fetch 60         # recovers days a missed run lost
+python scripts/backfill.py --details 120      # watch RPE/feel, stamina, run/walk
+                                              # split for stored activities
 ```
 
 `--reparse` is free and instant — every new metric was already sitting in the

@@ -74,6 +74,124 @@ def strength_done_dates(notes: list, activities: list) -> set:
     return days
 
 
+# Garmin exercise categories by what they load. Lower-body is what matters for
+# the running plan: a heavy leg session within ~48 h of a long run or a hard
+# descent stacks on the same quads, a session of rows and curls does not.
+LOWER_BODY = {"SQUAT", "DEADLIFT", "LUNGE", "HIP_RAISE", "CALF_RAISE", "STEP_UP",
+              "HIP_STABILITY", "OLYMPIC_LIFT", "LEG_CURL", "LEG_PRESS", "HIP_SWING"}
+CORE = {"PLANK", "CRUNCH", "SIT_UP", "CORE", "LEG_RAISE", "HIP_STABILITY_CORE"}
+UPPER_BODY = {"BENCH_PRESS", "PUSH_UP", "PULL_UP", "ROW", "CURL", "TRICEPS_EXTENSION",
+              "SHOULDER_PRESS", "LATERAL_RAISE", "SHRUG", "CHEST_FLY", "SHOULDER_STABILITY"}
+# Banded and similar "equipment" categories carry the movement in subCategory.
+_EQUIPMENT_CATEGORIES = {"BANDED_EXERCISES", "SUSPENSION", "TOTAL_BODY"}
+# Single-leg and eccentric work: what protects quads and hips on long descents.
+_TRAIL_SPECIFIC = ("SINGLE_LEG", "LUNGE", "STEP_UP", "STEP_DOWN", "CALF_RAISE",
+                   "ROMANIAN", "SPLIT_SQUAT", "PISTOL", "LATERAL_WALK")
+LEG_HEAVY_SETS = 6
+
+
+def strength_exercises(a) -> list:
+    """Per-exercise rows from Garmin (as corrected in Connect), or []."""
+    import json
+    try:
+        return json.loads(a.get("strength_sets_json") or "[]")
+    except (TypeError, ValueError):
+        return []
+
+
+def exercise_group(e: dict) -> str:
+    cat = e.get("cat") or ""
+    if cat in _EQUIPMENT_CATEGORIES:
+        cat = e.get("ex") or cat
+    if cat in LOWER_BODY:
+        return "lower"
+    if cat in CORE:
+        return "core"
+    if cat in UPPER_BODY:
+        return "upper"
+    return "other"   # warm-up, cardio, carries, UNKNOWN
+
+
+def exercise_name(e: dict) -> str:
+    return (e.get("ex") or e.get("cat") or "unknown").replace("_", " ").lower()
+
+
+def is_trail_specific(e: dict) -> bool:
+    text = f"{e.get('cat') or ''} {e.get('ex') or ''}"
+    return any(k in text for k in _TRAIL_SPECIFIC)
+
+
+def strength_split(a) -> dict:
+    """{lower, upper, core, other} -> number of sets in one session."""
+    out = {"lower": 0, "upper": 0, "core": 0, "other": 0}
+    for e in strength_exercises(a):
+        out[exercise_group(e)] += _f(e.get("sets"), 0)
+    return {k: int(v) for k, v in out.items()}
+
+
+def describe_strength(a, max_items: int = 8) -> str:
+    """'legs 6 / upper 9 / core 3 sets: kettlebell deadlift 3x38 reps @20kg, ...'"""
+    ex = strength_exercises(a)
+    if not ex:
+        return ""
+    sp = strength_split(a)
+    bits = []
+    for e in [e for e in ex if exercise_group(e) != "other"][:max_items]:
+        if e.get("reps"):
+            work = f"{e['sets']}x, {e['reps']} reps"
+        else:
+            work = f"{e['sets']}x, {e.get('s')}s total"
+        bits.append(f"{exercise_name(e)} {work}" + (f" @{e['kg']:g}kg" if e.get("kg") else ""))
+    return (f"legs {sp['lower']} / upper {sp['upper']} / core {sp['core']} sets"
+            + (f" ({sp['other']} unclassified)" if sp["other"] else "")
+            + (": " + "; ".join(bits) if bits else ""))
+
+
+def lift_progression(activities: list, group: str = "lower", sessions: int = 3) -> dict:
+    """{exercise: ['2026-08-25 30 reps @20kg', ...]} -- the last few sessions of
+    each lift in `group`, oldest first. Shows overload (or a stall) as measured
+    numbers instead of the model's recollection."""
+    out = {}
+    for a in sorted((a for a in activities if _is_strength(a)), key=lambda a: a.get("date") or ""):
+        for e in strength_exercises(a):
+            if exercise_group(e) != group:
+                continue
+            work = (f"{e['reps']} reps" if e.get("reps") else f"{e.get('s')}s") \
+                + (f" @{e['kg']:g}kg" if e.get("kg") else "")
+            out.setdefault(exercise_name(e), []).append(f"{a['date']} {e['sets']}x {work}")
+    return {k: v[-sessions:] for k, v in out.items()}
+
+
+def strength_content(activities: list) -> dict | None:
+    """The week's Garmin-recorded strength by body region."""
+    sessions = [a for a in activities if _is_strength(a) and strength_exercises(a)]
+    if not sessions:
+        return None
+    total = {"lower": 0, "upper": 0, "core": 0, "other": 0}
+    trail = set()
+    for a in sessions:
+        for k, v in strength_split(a).items():
+            total[k] += v
+        trail |= {exercise_name(e) for e in strength_exercises(a) if is_trail_specific(e)}
+    return {"sessions": len(sessions), "sets": total, "trail_specific": sorted(trail)}
+
+
+def movement(week_metrics: list) -> dict | None:
+    """All-day steps and floors -- includes activities, so it is total daily
+    load, not 'extra' load. Floors are barometric metres climbed on foot."""
+    rows = [m for m in week_metrics if m.get("steps") is not None]
+    if not rows:
+        return None
+    return {
+        "days": len(rows),
+        "steps": sum(int(_f(m.get("steps"))) for m in rows),
+        "floors_up_m": round(sum(_f(m.get("floors_up_m")) for m in rows)),
+        "floors_down_m": round(sum(_f(m.get("floors_down_m")) for m in rows)),
+        "vigorous_min": sum(int(_f(m.get("intensity_vigorous_min"))) for m in rows),
+        "moderate_min": sum(int(_f(m.get("intensity_moderate_min"))) for m in rows),
+    }
+
+
 def _start_hour(a):
     s = a.get("start_local")
     if not isinstance(s, str):
@@ -381,6 +499,42 @@ def describe(s: dict, gaps: list = None, notes: list = None,
         if s.get("strength_missed"):
             L.append(f"  planned days with no strength logged that same day: "
                      f"{', '.join(s['strength_missed'])}")
+
+    sc = s.get("strength_content")
+    if sc:
+        L.append("")
+        L.append("STRENGTH CONTENT (Garmin exercise sets, as corrected in Connect)")
+        st = sc["sets"]
+        L.append(f"  {sc['sessions']} session(s): legs {st['lower']} / upper {st['upper']} / "
+                 f"core {st['core']} sets" + (f", {st['other']} unclassified" if st["other"] else ""))
+        L.append("  single-leg / eccentric (downhill protection): "
+                 + (", ".join(sc["trail_specific"]) if sc["trail_specific"]
+                    else "NONE this week"))
+    if s.get("lift_progression"):
+        L.append("  lower-body lifts, last sessions (oldest first):")
+        for name, rows in sorted(s["lift_progression"].items()):
+            L.append(f"    {name}: " + " -> ".join(rows))
+
+    mv = s.get("movement")
+    if mv:
+        L.append("")
+        L.append(f"DAILY MOVEMENT (all day incl. activities, {mv['days']} days with data)")
+        L.append(f"  steps {mv['steps']:,} (avg {mv['steps'] // mv['days']:,}/day), "
+                 f"climbed {mv['floors_up_m']} m / descended {mv['floors_down_m']} m on foot, "
+                 f"intensity minutes {mv['moderate_min']} moderate / {mv['vigorous_min']} vigorous")
+
+    z = s.get("hr_zones")
+    if z:
+        L.append("")
+        L.append("WATCH HR ZONE SETTINGS (Garmin; zone minutes above are counted against these)")
+        L.append(f"  Z1 {z['z1']}-{z['z2'] - 1}, Z2 {z['z2']}-{z['z3'] - 1}, Z3 {z['z3']}-{z['z4'] - 1}, "
+                 f"Z4 {z['z4']}-{z['z5'] - 1}, Z5 {z['z5']}+ bpm; LTHR {z.get('lthr')}, "
+                 f"max {z.get('max')}")
+        L.append(f"  so 'easy' (Z1-Z2) above means below {z['z3']} bpm -- compare with the "
+                 "plan's own AeT before calling the week easy enough")
+        if z.get("rhr_stale"):
+            L.append(f"  watch uses resting HR {z['rhr_used']} but measured 7-day is "
+                     f"{z['rhr_measured']} (auto-update off) -- zone settings may be stale")
 
     L.append("")
     L.append("MANUAL LOG (strength, feet, soreness -- not available from Garmin)")

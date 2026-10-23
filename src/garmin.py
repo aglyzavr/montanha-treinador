@@ -103,6 +103,30 @@ def _activities(g: Client, start: str, end: str, page: int = 100) -> list:
         offset += page
 
 
+def activity_detail(g: Client, activity_id) -> dict:
+    """The parts of /activity/{id} the list doesn't carry: watch RPE / feel,
+    stamina, and the run / walk / stand split. One request per activity.
+    metadataDTO (profile, images, device) is dropped -- nothing in it is used."""
+    d = g.get(f"/activity-service/activity/{activity_id}") or {}
+    return {"summaryDTO": d.get("summaryDTO"), "splitSummaries": d.get("splitSummaries")}
+
+
+def with_details(g: Client, acts):
+    if isinstance(acts, list):
+        for a in acts:
+            if isinstance(a, dict) and a.get("activityId"):
+                a["detail"] = _safe(activity_detail, g, a["activityId"])
+    return acts
+
+
+def fetch_hr_zones(g: Client) -> dict:
+    """The RUNNING heart-rate zones configured on the watch (zone time in every
+    activity is counted against these)."""
+    zones = g.get("/biometric-service/heartRateZones/v2") or []
+    by_sport = {z.get("sport"): z for z in zones if isinstance(z, dict)}
+    return by_sport.get("RUNNING") or by_sport.get("DEFAULT") or {}
+
+
 def fetch_day(g: Client, cdate: date) -> dict:
     """Fetch the raw payloads for a single calendar date."""
     d = cdate.isoformat()
@@ -116,7 +140,7 @@ def fetch_day(g: Client, cdate: date) -> dict:
         "heart_rate": _safe(g.get, "/wellness-service/wellness/dailyHeartRate", {"date": d}),
         "body_battery": _safe(g.get, "/wellness-service/wellness/bodyBattery/reports/daily",
                               {"startDate": d, "endDate": d}),
-        "activities": _safe(_activities, g, d, d),
+        "activities": with_details(g, _safe(_activities, g, d, d)),
     }
 
 
@@ -218,6 +242,15 @@ def _daily_stats(day: dict) -> dict:
             "body_battery_charge": _sleep_charge(bb_report),
             "stress_avg": _dig(s, "stress", "avgLevel"),
             "waking_respiration": _num(_dig(s, "respiration", "avgValue")),
+            # --- daily movement: load the activity list never shows ---
+            "steps": _dig(s, "movement", "steps", "value"),
+            "floors_up_m": _num(_dig(s, "movement", "floorsAscended", "distanceInMeters")),
+            "floors_down_m": _num(_dig(s, "movement", "floorsDescended", "distanceInMeters")),
+            "intensity_moderate_min": _dig(s, "intensityMinutes", "moderate"),
+            "intensity_vigorous_min": _dig(s, "intensityMinutes", "vigorous"),
+            "stress_rest_pct": (round(_dig(s, "stress", "restProportion") * 100, 1)
+                                if _num(_dig(s, "stress", "restProportion")) is not None
+                                else None),
         }
     s = _as_dict(raw)                              # garminconnect usersummary
     return {
@@ -229,6 +262,12 @@ def _daily_stats(day: dict) -> dict:
         "body_battery_charge": _num(s.get("bodyBatteryDuringSleep")),
         "stress_avg": s.get("averageStressLevel"),
         "waking_respiration": _num(s.get("avgWakingRespirationValue")),
+        "steps": s.get("totalSteps"),
+        "floors_up_m": _num(s.get("floorsAscendedInMeters")),
+        "floors_down_m": _num(s.get("floorsDescendedInMeters")),
+        "intensity_moderate_min": s.get("moderateIntensityMinutes"),
+        "intensity_vigorous_min": s.get("vigorousIntensityMinutes"),
+        "stress_rest_pct": _num(s.get("restStressPercentage")),
     }
 
 
@@ -261,6 +300,10 @@ def normalize(day: dict) -> dict:
         # Why Garmin raised sleep need. "HIGH_ACWR" is the one place the
         # Personal API still lets Garmin's own load ratio show through.
         "sleep_need_feedback": _dig(ds, "sleepNeed", "trainingFeedback"),
+        # Garmin's own reading of the night, e.g. NEGATIVE_LATE_BED_TIME: tells
+        # the coach whether a poor night was training or life.
+        "sleep_feedback": ds.get("sleepScoreFeedback"),
+        "sleep_insight": ds.get("sleepScoreInsight"),
         "avg_sleep_stress": _num(ds.get("avgSleepStress")),
         "awake_count": _num(ds.get("awakeCount")),
         "sleep_respiration": _num(ds.get("averageRespirationValue")),
@@ -347,9 +390,49 @@ def normalize_activities(day: dict) -> list:
             "body_battery_delta": _num(a.get("differenceBodyBattery")),
             "calories": _num(a.get("calories")),
             "location": a.get("locationName"),
+            **_detail_fields(a.get("detail")),
+            "strength_sets_json": _strength_sets(a.get("summarizedExerciseSets")),
             "raw_json": json.dumps(a, default=str),
         })
     return out
+
+
+def _detail_fields(detail) -> dict:
+    """Watch self-evaluation, stamina and run/walk split from activity_detail()."""
+    s = _as_dict(_dig(detail, "summaryDTO", default={}))
+    rpe = _num(s.get("directWorkoutRpe"))
+    splits = {sp.get("splitType"): sp for sp in (_dig(detail, "splitSummaries", default=[]) or [])
+              if isinstance(sp, dict)}
+    run, walk = splits.get("RWD_RUN", {}), splits.get("RWD_WALK", {})
+    return {
+        # Garmin stores perceived effort x10 (athlete confirmed: 30 -> RPE 3).
+        "rpe": rpe / 10 if rpe is not None else None,
+        # 0 very weak / 25 weak / 50 normal / 75 strong / 100 very strong
+        "feel": _num(s.get("directWorkoutFeel")),
+        "stamina_start": _num(s.get("beginPotentialStamina")),
+        "stamina_end": _num(s.get("endPotentialStamina")),
+        "run_min": _minutes(run.get("duration")) if run else None,
+        "walk_min": _minutes(walk.get("duration")) if walk else None,
+        "run_gain_m": _num(run.get("elevationGain")),
+        "walk_gain_m": _num(walk.get("elevationGain")),
+    }
+
+
+def _strength_sets(summary) -> str | None:
+    """Per-exercise totals as Garmin Connect shows them (including the
+    athlete's corrections there). Weight is grams in the payload; kg here."""
+    import json
+    if not isinstance(summary, list) or not summary:
+        return None
+    rows = []
+    for e in summary:
+        if not isinstance(e, dict) or not e.get("sets"):
+            continue
+        rows.append({"cat": e.get("category"), "ex": e.get("subCategory"),
+                     "sets": e.get("sets"), "reps": e.get("reps"),
+                     "kg": round(e["maxWeight"] / 1000, 1) if _num(e.get("maxWeight")) else 0,
+                     "s": round(e["duration"] / 1000) if _num(e.get("duration")) else None})
+    return json.dumps(rows) if rows else None
 
 
 def _latest(payload, *value_keys):

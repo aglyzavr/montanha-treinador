@@ -19,6 +19,23 @@ from .config import CONFIG, project_path
 from . import garmin, store, prompt, llm, notify, metrics, plan as planmod, inbox, runtime
 
 SCORES_MAX_AGE_DAYS = 14
+PROGRESSION_DAYS = 42      # lift history shown in the review
+RHR_STALE_BPM = 4          # watch's resting-HR setting vs measured
+
+
+def _zones(z: dict, week_metrics: list) -> dict | None:
+    """The watch's running zones, flagged when its resting HR is out of date."""
+    if not z or not z.get("zone3Floor"):
+        return None
+    measured = [m["rhr_7d_avg"] for m in week_metrics if m.get("rhr_7d_avg")]
+    used = z.get("restingHeartRateUsed")
+    return {
+        "z1": z.get("zone1Floor"), "z2": z.get("zone2Floor"), "z3": z.get("zone3Floor"),
+        "z4": z.get("zone4Floor"), "z5": z.get("zone5Floor"),
+        "lthr": z.get("lactateThresholdHeartRateUsed"), "max": z.get("maxHeartRateUsed"),
+        "rhr_used": used, "rhr_measured": measured[-1] if measured else None,
+        "rhr_stale": bool(used and measured and abs(used - measured[-1]) >= RHR_STALE_BPM),
+    }
 
 
 def backfill(g, db, start: date, end: date, log=print) -> list:
@@ -63,9 +80,14 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
     # 2. Backfill the window. (Garmin's weekly fitness scores -- hill/endurance
     # score, VO2max, training status -- aren't in the Personal API.)
     progress("Fetching Garmin data")
+    zones = {}
     try:
         g = garmin.connect()
         backfill(g, db, week_start, week_end)
+        try:
+            zones = garmin.fetch_hr_zones(g)
+        except Exception as e:
+            print(f"HR zone settings unavailable: {e}")
     except Exception as e:
         print(f"Garmin unavailable, reviewing on stored data only: {e}")
 
@@ -100,6 +122,11 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
     summary["strength_done"] = len(done)
     summary["strength_missed"] = ([d.isoformat() for d, _ in slots if d.isoformat() not in done]
                                   if len(done) < len(slots) else [])
+    summary["strength_content"] = metrics.strength_content(activities)
+    summary["lift_progression"] = metrics.lift_progression(db.activities_between(
+        (week_end - timedelta(days=PROGRESSION_DAYS)).isoformat(), week_end.isoformat()))
+    summary["movement"] = metrics.movement(week_metrics)
+    summary["hr_zones"] = _zones(zones, week_metrics)
 
     principles = prompt.load_principles(project_path(cfg["paths"]["principles"]))
     system, user = prompt.build_weekly(principles, plan_doc, summary, week_metrics,

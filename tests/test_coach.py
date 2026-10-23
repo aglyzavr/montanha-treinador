@@ -937,6 +937,112 @@ def test_daily_prompt_carries_local_readiness_and_acwr():
     assert "ACWR (local, from activity training load): 1.2" in user
 
 
+# --------------------------------------------------------------------------
+# Phase 2: strength content, watch self-evaluation, daily movement
+# --------------------------------------------------------------------------
+
+_EXERCISES = [
+    {"category": "DEADLIFT", "subCategory": "KETTLEBELL_DEADLIFT", "sets": 3, "reps": 38,
+     "maxWeight": 20000, "duration": 179906},
+    {"category": "BANDED_EXERCISES", "subCategory": "SQUAT", "sets": 4, "reps": 79,
+     "maxWeight": 0, "duration": 200000},
+    {"category": "ROW", "subCategory": "SINGLE_ARM_NEUTRAL_GRIP_DUMBBELL_ROW", "sets": 3,
+     "reps": 45, "maxWeight": 8000, "duration": 149153},
+    {"category": "PLANK", "sets": 3, "reps": 0, "maxWeight": 0, "duration": 150873},
+    {"category": "UNKNOWN", "sets": 2, "reps": 10, "maxWeight": 0, "duration": 60000},
+]
+
+
+def _strength_activity(d="2026-10-20", exercises=_EXERCISES):
+    raw = {"activityId": 1, "activityType": {"typeKey": "strength_training"},
+           "duration": 1800, "summarizedExerciseSets": exercises}
+    return garmin.normalize_activities({"date": d, "activities": [raw]})[0]
+
+
+def test_strength_sets_are_grouped_by_body_region():
+    a = _strength_activity()
+    assert metrics.strength_split(a) == {"lower": 7, "upper": 3, "core": 3, "other": 2}
+    text = metrics.describe_strength(a)
+    assert "legs 7 / upper 3 / core 3 sets (2 unclassified)" in text
+    assert "kettlebell deadlift 3x, 38 reps @20kg" in text   # grams -> kg
+    assert "plank 3x, 151s total" in text                    # holds count time
+
+
+def test_lift_progression_shows_overload_oldest_first():
+    acts = [_strength_activity("2026-08-25", [dict(_EXERCISES[0], reps=30)]),
+            _strength_activity("2026-09-10", [_EXERCISES[0]])]
+    prog = metrics.lift_progression(acts)
+    assert prog["kettlebell deadlift"] == ["2026-08-25 3x 30 reps @20kg",
+                                           "2026-09-10 3x 38 reps @20kg"]
+
+
+def test_missing_single_leg_work_is_called_out():
+    sc = metrics.strength_content([_strength_activity()])
+    assert sc["trail_specific"] == []
+    assert "single-leg / eccentric (downhill protection): NONE" in metrics.describe(
+        dict(metrics.summarize([], {}), strength_content=sc))
+    lunge = _strength_activity(exercises=[{"category": "LUNGE", "subCategory": "WALKING_LUNGE",
+                                           "sets": 3, "reps": 24, "maxWeight": 0}])
+    assert metrics.strength_content([lunge])["trail_specific"] == ["walking lunge"]
+
+
+def test_watch_rpe_feel_and_run_walk_split_are_read_from_activity_detail():
+    raw = {"activityId": 2, "activityType": {"typeKey": "trail_running"},
+           "detail": {"summaryDTO": {"directWorkoutRpe": 30, "directWorkoutFeel": 100,
+                                     "beginPotentialStamina": 98, "endPotentialStamina": 44},
+                      "splitSummaries": [
+                          {"splitType": "RWD_RUN", "duration": 7968, "elevationGain": 438},
+                          {"splitType": "RWD_WALK", "duration": 3942, "elevationGain": 639}]}}
+    a = garmin.normalize_activities({"date": "2026-10-18", "activities": [raw]})[0]
+    assert a["rpe"] == 3 and a["feel"] == 100              # stored x10 by Garmin
+    assert (a["stamina_start"], a["stamina_end"]) == (98, 44)
+    assert (a["run_gain_m"], a["walk_gain_m"], a["walk_min"]) == (438, 639, 66)
+    line = prompt._fmt_activities([a])
+    assert "watch RPE 3/10 feel very strong" in line and "hiked 639m" in line
+
+
+def test_daily_movement_reads_both_api_shapes():
+    new = garmin.normalize(_personal_day() | {"stats": {"data": [{
+        "calendarDate": "2026-10-20",
+        "movement": {"steps": {"value": 24812},
+                     "floorsAscended": {"distanceInMeters": 326.53},
+                     "floorsDescended": {"distanceInMeters": 295.93}},
+        "intensityMinutes": {"moderate": 35, "vigorous": 77},
+        "stress": {"avgLevel": 23, "restProportion": 0.47}}]}})
+    old = garmin.normalize({"date": "2026-10-15", "stats": {
+        "totalSteps": 10872, "floorsAscendedInMeters": 48.1, "floorsDescendedInMeters": 113.7,
+        "moderateIntensityMinutes": 18, "vigorousIntensityMinutes": 41,
+        "restStressPercentage": 59.83}})
+    assert (new["steps"], new["floors_up_m"], new["intensity_vigorous_min"]) == (24812, 326.53, 77)
+    assert new["stress_rest_pct"] == 47.0 and old["stress_rest_pct"] == 59.83
+    assert (old["steps"], old["floors_down_m"]) == (10872, 113.7)
+
+
+def test_leg_heavy_strength_before_a_run_is_flagged():
+    text = prompt._fmt_recent_strength([_strength_activity("2026-10-20")], date(2026, 10, 21))
+    assert "LEG-HEAVY within 48 h (7 lower-body sets)" in text
+    upper = _strength_activity("2026-10-20", [_EXERCISES[2]])
+    assert "LEG-HEAVY" not in prompt._fmt_recent_strength([upper], date(2026, 10, 21))
+
+
+def test_garmin_strength_session_is_the_stage_fallback_without_a_note():
+    hint = prompt._stage_hint(None, _strength_activity("2026-09-10"))
+    assert "Garmin recorded the last session on 2026-09-10" in hint
+    assert "kettlebell deadlift" in hint
+    assert "Stage 1" in prompt._stage_hint(None, None)
+
+
+def test_weekly_shows_watch_zones_and_flags_a_stale_resting_hr():
+    from src import weekly
+    z = weekly._zones({"zone1Floor": 116, "zone2Floor": 143, "zone3Floor": 158,
+                       "zone4Floor": 168, "zone5Floor": 178, "restingHeartRateUsed": 53,
+                       "lactateThresholdHeartRateUsed": 181, "maxHeartRateUsed": 193},
+                      [{"rhr_7d_avg": 46}])
+    text = metrics.describe(dict(metrics.summarize([], {}), hr_zones=z))
+    assert "Z2 143-157" in text and "below 158 bpm" in text
+    assert "resting HR 53 but measured 7-day is 46" in text
+
+
 if __name__ == "__main__":
     fails = []
     for name, fn in sorted(globals().items()):

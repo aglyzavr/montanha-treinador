@@ -52,6 +52,15 @@ def _last_strength_note(db, today: date):
     return detailed[-1] if detailed else None
 
 
+def _last_strength_activity(db, today: date):
+    """Most recent Garmin strength session with an exercise list -- the stage
+    fallback when no check-in note says what was done."""
+    acts = db.activities_between((today - timedelta(days=STAGE_LOOKBACK_DAYS)).isoformat(),
+                                 today.isoformat())
+    done = [a for a in acts if metrics._is_strength(a) and metrics.strength_exercises(a)]
+    return done[-1] if done else None
+
+
 def _ensure_strength(cfg, system, user, text, due, reference, last_note, progress):
     """Strength days must come back with a circuit or a reasoned skip.
 
@@ -194,6 +203,9 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
         db.notes_between(week_start.isoformat(), today.isoformat()),
         db.activities_between(week_start.isoformat(), today.isoformat()))
     last_strength_note = _last_strength_note(db, today)
+    recent_acts = db.activities_between((today - timedelta(days=3)).isoformat(),
+                                        yesterday.isoformat())
+    last_strength_activity = _last_strength_activity(db, today)
     due = prompt.strength_due(plan_doc, today, strength_status) if strength_reference else None
 
     system, user = prompt.build_daily(principles, plan_doc, m_today, yest_acts,
@@ -203,7 +215,10 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
                                       strength_status=strength_status,
                                       last_strength_note=last_strength_note,
                                       readiness=today_readiness, acwr=acwr,
-                                      readiness_trend=readiness_trend)
+                                      readiness_trend=readiness_trend,
+                                      yesterday_metrics=m_yest,
+                                      recent_activities=recent_acts,
+                                      last_strength_activity=last_strength_activity)
 
     progress("Thinking (local model)")
     try:

@@ -96,16 +96,22 @@ def strength_due(plan_doc, today, status: dict = None):
             "tomorrow_is_strength": bool(tomorrow.get("strength_today"))}
 
 
-def _stage_hint(last_strength_note) -> str:
+def _stage_hint(last_strength_note, last_strength_activity=None) -> str:
     if last_strength_note:
         return (f"last logged strength session: {last_strength_note['date']} "
                 f"\"{last_strength_note['text']}\" -- continue from that stage/exercises.")
+    garmin_detail = metricsmod.describe_strength(last_strength_activity or {})
+    if garmin_detail:
+        return (f"no stage logged, but Garmin recorded the last session on "
+                f"{last_strength_activity['date']}: {garmin_detail} -- continue progression "
+                "from those exercises and loads, and ask the athlete to note the stage.")
     return ("no strength session with details logged in the last 60 days -- default to "
             "the Stage 1 circuits and tell the athlete to self-test with the assessment "
             "tests in the reference, then note the stage in the check-in strength detail.")
 
 
-def build_strength_block(due, ctx, status, last_strength_note=None) -> str:
+def build_strength_block(due, ctx, status, last_strength_note=None,
+                         last_strength_activity=None) -> str:
     """The short, required strength section placed right after the running
     prescription. The (long) reference content goes at the end of the prompt."""
     if not due:
@@ -138,7 +144,7 @@ def build_strength_block(due, ctx, status, last_strength_note=None) -> str:
         planned = status["planned_so_far"] + (1 if due["kind"] == "today" else 0)
         L.append(f"  strength this week: {status['done_this_week']} done before today, "
                  f"{planned} planned up to and including today")
-    L.append(f"  stage: {_stage_hint(last_strength_note)}")
+    L.append(f"  stage: {_stage_hint(last_strength_note, last_strength_activity)}")
     return "\n\n" + "\n".join(L) + "\n" + STRENGTH_FORMATTING
 
 
@@ -547,6 +553,10 @@ def _fmt_metrics(m: dict) -> str:
         if m.get("avg_sleep_stress") is not None:
             L.append(f"  sleep stress: {m['avg_sleep_stress']}, "
                      f"respiration {m.get('sleep_respiration')}")
+        reads = [r for r in (m.get("sleep_feedback"), m.get("sleep_insight"))
+                 if r and r != "NONE"]
+        if reads:
+            L.append(f"  Garmin's read of the night: {' / '.join(reads)}")
     hrv = m.get("hrv_overnight")
     if hrv is not None:
         base = ""
@@ -574,7 +584,9 @@ def _fmt_metrics(m: dict) -> str:
                  f"({charge}day low {m.get('body_battery_low')}, "
                  f"high {m.get('body_battery_high')})")
     if m.get("stress_avg") is not None:
-        L.append(f"  avg stress: {m['stress_avg']}")
+        L.append(f"  avg stress: {m['stress_avg']}"
+                 + (f", {m['stress_rest_pct']}% of the day at rest"
+                    if m.get("stress_rest_pct") is not None else ""))
     return "\n".join(L) if L else "  (no data)"
 
 
@@ -601,8 +613,50 @@ def _fmt_activities(acts: list) -> str:
             bits.append(f"anTE {round(a['anaerobic_te'], 1)}")
         if a.get("max_temp_c") is not None:
             bits.append(f"{round(a['max_temp_c'])}C")
+        if a.get("rpe") is not None:
+            bits.append(f"watch RPE {a['rpe']:g}/10"
+                        + (f" feel {FEEL.get(a.get('feel'), a.get('feel'))}"
+                           if a.get("feel") is not None else ""))
+        if a.get("stamina_start") is not None and a.get("stamina_end") is not None:
+            bits.append(f"stamina {round(a['stamina_start'])}->{round(a['stamina_end'])}")
+        if a.get("walk_gain_m") and a.get("run_gain_m") is not None:
+            bits.append(f"climbing: ran {round(a['run_gain_m'])}m / hiked "
+                        f"{round(a['walk_gain_m'])}m ({a.get('walk_min')} min hiking)")
+        strength = metricsmod.describe_strength(a)
+        if strength:
+            bits.append("-- " + strength)
         lines.append(" ".join(bits))
     return "\n".join(lines)
+
+
+FEEL = {0: "very weak", 25: "weak", 50: "normal", 75: "strong", 100: "very strong"}
+
+
+def _fmt_movement(m: dict) -> str:
+    """Yesterday's all-day movement (the 06:30 row for today is still partial)."""
+    if not m or m.get("steps") is None:
+        return ""
+    return (f"\n  all day: {m['steps']:,} steps, climbed {round(m.get('floors_up_m') or 0)} m / "
+            f"descended {round(m.get('floors_down_m') or 0)} m on foot (includes the "
+            f"activities above), intensity minutes {m.get('intensity_moderate_min')} "
+            f"moderate / {m.get('intensity_vigorous_min')} vigorous")
+
+
+def _fmt_recent_strength(acts: list, today) -> str:
+    """Leg strength in the last 48 h stacks on the same quads as the run."""
+    rows = [a for a in acts or [] if metricsmod._is_strength(a)]
+    if not rows:
+        return ""
+    L = ["\n\nRECENT STRENGTH (Garmin, last 3 days)"]
+    for a in rows:
+        sp = metricsmod.strength_split(a)
+        days = (today - date.fromisoformat(a["date"])).days
+        heavy = (sp["lower"] >= metricsmod.LEG_HEAVY_SETS and days <= 2)
+        L.append(f"  {a['date']}: " + (metricsmod.describe_strength(a) or "no exercise detail")
+                 + (f"\n    LEG-HEAVY within 48 h ({sp['lower']} lower-body sets): treat "
+                    "quads/hips as pre-fatigued for long, steep or downhill running"
+                    if heavy else ""))
+    return "\n".join(L)
 
 
 def _fmt_acwr(acwr) -> str:
@@ -635,7 +689,8 @@ def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
                 recent, today=None, notes=None, strength_reference=None,
                 activity_history=None, strength_status=None,
                 last_strength_note=None, readiness=None, acwr=None,
-                readiness_trend=None):
+                readiness_trend=None, yesterday_metrics=None,
+                recent_activities=None, last_strength_activity=None):
     today = today or date.today()
     ctx = planmod.resolve(plan_doc, today)
     system = principles + "\n\n---\n" + OUTPUT_CONTRACT
@@ -649,7 +704,8 @@ def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
     # where the model reads it as part of today's session; the long reference
     # text goes at the end so it doesn't bury the recovery data.
     due = strength_due(plan_doc, today, strength_status) if strength_reference else None
-    strength_block = build_strength_block(due, ctx, strength_status, last_strength_note)
+    strength_block = build_strength_block(due, ctx, strength_status, last_strength_note,
+                                          last_strength_activity)
     reference_block = f"""
 
 STRENGTH REFERENCE CONTENT (for the strength session above -- copy circuits
@@ -668,7 +724,7 @@ LAST NIGHT / TODAY'S RECOVERY
 {readinessmod.describe(readiness)}{_fmt_acwr(acwr)}
 
 YESTERDAY'S TRAINING
-{_fmt_activities(yesterday_activities)}
+{_fmt_activities(yesterday_activities)}{_fmt_movement(yesterday_metrics)}{_fmt_recent_strength(recent_activities, today)}
 
 RECENT TREND
 {_fmt_trend(recent, readiness_trend)}

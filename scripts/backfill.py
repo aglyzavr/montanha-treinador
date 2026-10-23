@@ -15,6 +15,10 @@ Two independent jobs:
               2026-07-31 and 2026-08-01, which vanished because the job did not
               run on the following mornings and nothing ever went back for them.
 
+  --details N Fetches each stored activity's detail (watch RPE / feel, stamina,
+              run / walk split) for the last N days, where it is missing. One
+              request per activity, paced 1/s.
+
 (Garmin's weekly fitness scores used to come with --scores; the Personal API
 doesn't have them, so stored ones are only re-read by --reparse.)
 
@@ -22,10 +26,12 @@ Usage:
     python scripts/backfill.py --reparse
     python scripts/backfill.py --fetch 60
     python scripts/backfill.py --reparse --fetch 60
+    python scripts/backfill.py --details 120
 """
 import argparse
 import json
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -92,6 +98,32 @@ def fetch(db, days: int) -> list:
     return filled
 
 
+def fetch_details(db, days: int) -> int:
+    start = (date.today() - timedelta(days=days)).isoformat()
+    todo = [a for a in db.activities_between(start, date.today().isoformat())
+            if "detail" not in json.loads(a["raw_json"] or "{}")]
+    if not todo:
+        print("Every activity in range already has its detail.")
+        return 0
+    print(f"  {len(todo)} activities to fetch (~{len(todo)} s)")
+    g = garmin.connect()
+    done = 0
+    for a in todo:
+        raw = json.loads(a["raw_json"])
+        try:
+            raw["detail"] = garmin.activity_detail(g, a["id"])
+        except garmin.GarminAuthError:
+            raise
+        except Exception as e:
+            print(f"  FAILED {a['date']} {a['id']}: {e}")
+            continue
+        for row in garmin.normalize_activities({"date": a["date"], "activities": [raw]}):
+            db.upsert_activity(row)
+        done += 1
+        time.sleep(1)
+    return done
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -99,9 +131,11 @@ def main():
                     help="re-extract new columns from stored raw_json (no network)")
     ap.add_argument("--fetch", type=int, metavar="DAYS",
                     help="fetch missing days from the last DAYS days")
+    ap.add_argument("--details", type=int, metavar="DAYS",
+                    help="fetch activity detail (RPE, stamina, run/walk) for the last DAYS days")
     args = ap.parse_args()
 
-    if not (args.reparse or args.fetch):
+    if not (args.reparse or args.fetch or args.details):
         ap.print_help()
         return
 
@@ -118,6 +152,10 @@ def main():
         print(f"Fetching missing days (last {args.fetch})...")
         filled = fetch(db, args.fetch)
         print(f"  recovered {len(filled)} day(s)")
+
+    if args.details:
+        print(f"Fetching activity detail (last {args.details} days)...")
+        print(f"  updated {fetch_details(db, args.details)} activities")
 
 
 if __name__ == "__main__":
