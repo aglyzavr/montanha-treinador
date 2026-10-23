@@ -11,6 +11,8 @@ metrics
 notify
 plan
 prompt
+readiness
 runtime
+static
 store
 weekly

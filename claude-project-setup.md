@@ -51,10 +51,10 @@ Long runs are prescribed in time + vert, not distance. `estimate_distance_km()` 
 **4. Missing data is stated, never filled.**
 If a value is unknown, the message says unknown. Weekly totals with data gaps are reported as a lower bound. Strength/feet/soreness that were never logged are reported as unlogged, not assumed done. `activity_fetch` exists because a metrics row is not proof a day's training was seen — the 06:30 job stores that morning's sleep long before the day's training exists, so only a fetch made on a *later* calendar day counts.
 
-**5. `src/garmin.py` auth is load-bearing and rate-limited.**
-Login happens once via `scripts/setup_garmin_login.py`, which caches a token at `~/.garminconnect`; jobs resume from it and never re-login. Do not add login calls to the job path. Do not loop retries against Garmin. Payload field names drift — when a metric comes back empty, inspect `raw_json` in the DB and adjust the `.get()`/`_dig()` paths rather than changing the fetch strategy.
+**5. `src/garmin.py` is the only module that talks to Garmin.**
+It uses Garmin's official Personal API: `connect()` exchanges `GARMIN_API_KEY` for a 24 h bearer token once per run (`scripts/setup_garmin_key.py` checks a new key). Do not loop retries against Garmin. The API has no readiness, recovery time, acute load, VO2max or hill/endurance score — `src/readiness.py` and `metrics._acwr` replace them; `scripts/probe_personal_api.py` re-checks coverage. Payload field names drift — when a metric comes back empty, inspect `raw_json` in the DB and adjust the `.get()`/`_dig()` paths rather than changing the fetch strategy.
 
-**6. Never commit or print secrets.** `.env` holds Garmin credentials and the Telegram token. It is git-ignored. Don't echo it, don't paste values into commit messages or files, don't add it to examples (`.env.example` carries placeholders only).
+**6. Never commit or print secrets.** `.env` holds the Garmin API key and the Telegram token. It is git-ignored. Don't echo it, don't paste values into commit messages or files, don't add it to examples (`.env.example` carries placeholders only).
 
 **7. Store migrations are additive only.** Add to `_MIGRATIONS` as `(table, column, type)`; `init()` ALTERs anything missing. Never rewrite existing history, never drop a column, always keep `raw_json` so new fields can be backfilled from stored payloads with `scripts/backfill.py --reparse` (free, offline) instead of re-hitting Garmin.
 
@@ -66,7 +66,7 @@ Login happens once via `scripts/setup_garmin_login.py`, which caches a token at 
 
 ### Working conventions
 
-- Python ≥3.12, venv at `.venv`, `pip install -e .`. Dependencies stay minimal (garminconnect, requests, python-dotenv, PyYAML) — think hard before adding one.
+- Python ≥3.12, venv at `.venv`, `pip install -e .`. Dependencies stay minimal (requests, python-dotenv, PyYAML) — think hard before adding one.
 - Run tests before and after any change to `plan.py`, `metrics.py`, `prompt.py` or `llm.py`: `source .venv/bin/activate && python -m pytest tests/ -q`.
 - `python -m src.weekly --dry-run` prints the assembled prompt without calling the model — use it to verify prompt changes cheaply.
 - New behaviour that affects what the athlete is told gets a test in `tests/test_coach.py`. Prompt-construction tests assert the *numbers appear in the prompt*, not that the model behaved.

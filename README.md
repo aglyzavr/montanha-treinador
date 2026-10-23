@@ -15,7 +15,7 @@ text message.
 
 ## What you need to do (the connection/credential parts are yours)
 
-You'll set up four things: **Python deps**, **Ollama + model**, **Garmin login**,
+You'll set up four things: **Python deps**, **Ollama + model**, **Garmin API key**,
 **Telegram bot**. Then run it. Follow the steps in order.
 
 ### 0. Prerequisites
@@ -55,26 +55,29 @@ cp .env.example .env
 
 Open `.env` and fill in:
 
-- `GARMIN_EMAIL`, `GARMIN_PASSWORD` — your Garmin Connect login.
+- `GARMIN_API_KEY` — your Garmin Personal API key (step 4).
 - `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` — from step 5 below.
 - (optional) `SMTP_*` + `EMAIL_TO` if you also want the weekly review emailed.
 
 `.env` is git-ignored. Keep it private.
 
-### 4. Log in to Garmin once (creates a cached token)
+### 4. Create a Garmin Personal API key
+
+- Open https://connect.garmin.com/app/settings/personalApiToken, select
+  **Create Key**, choose **1 year**, and copy the key (it is shown only once).
+- Put it in `.env` as `GARMIN_API_KEY=...`, then check it:
 
 ```bash
-python scripts/setup_garmin_login.py
+python scripts/setup_garmin_key.py
 ```
 
-- Enter the MFA code if prompted.
-- On success it caches a token at `~/.garminconnect` and runs a smoke test.
-- After this, the daily/weekly jobs **resume from the token** and never re-login
-  (this is deliberate — re-logging in every run can trip Garmin's rate limits).
-- If it fails on login/token: `pip install -U garminconnect`, then check the
-  [python-garminconnect README](https://github.com/cyberjunky/python-garminconnect) —
-  the auth/token API is the one part that changes over time, and it's isolated in
-  `src/garmin.py` + this script so a fix is small.
+- It exchanges the key for a token and fetches last night's sleep. No password,
+  no MFA: every run exchanges the key for a fresh 24 h token.
+- Garmin emails you about a week before the key expires. Create a new one and
+  replace it in `.env`.
+- The Personal API has no Training Readiness, recovery time, acute load,
+  VO2max or hill/endurance score. The coach computes its own readiness
+  (`src/readiness.py`) and ACWR from your data instead.
 
 ### 5. Create the Telegram bot
 
@@ -180,7 +183,7 @@ src/llm.py      Ollama call (thinking mode) + output parsing
 src/notify.py   Telegram / email delivery
 src/daily.py    morning job  ->  python -m src.daily        (06:30 daily)
 src/weekly.py   weekly job   ->  python -m src.weekly       (07:30 Mondays)
-scripts/        Garmin login, backfill, launchd plist templates
+scripts/        Garmin key check, API probe, backfill, launchd plist templates
 data/           coach_principles.md, plan.json, coach.db
 ```
 
@@ -199,8 +202,8 @@ any day of the week and you get the same answer for that week.
   is already 900. Make sure nothing else heavy is running.
 - **A metric is always empty:** payload field names vary. Run a day, inspect
   `raw_json` in `data/coach.db`, and adjust the `.get()` paths in `src/garmin.py`.
-- **Garmin 401/429:** don't re-run the login script repeatedly. Wait, then rely on
-  the cached token. Update the library if 401s persist.
+- **Garmin key rejected (401/403):** the key expired or was deleted. Create a new
+  one (step 4). **429:** don't re-run; the next run backfills the gap.
 
 ## Notes
 

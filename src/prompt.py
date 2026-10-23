@@ -12,6 +12,7 @@ from statistics import median
 from . import llm
 from . import plan as planmod
 from . import metrics as metricsmod
+from . import readiness as readinessmod
 
 
 def load_principles(path: str) -> str:
@@ -540,7 +541,9 @@ def _fmt_metrics(m: dict) -> str:
                  f"(deep {m.get('deep_min')}, rem {m.get('rem_min')}, "
                  f"awake {m.get('awake_min')} over {m.get('awake_count')} wakes)")
         if m.get("sleep_need_min"):
-            L.append(f"  sleep need: {m['sleep_need_min']} min")
+            L.append(f"  sleep need: {m['sleep_need_min']} min"
+                     + (f" (Garmin raised it for: {m['sleep_need_feedback']})"
+                        if m.get("sleep_need_feedback") not in (None, "NO_CHANGE") else ""))
         if m.get("avg_sleep_stress") is not None:
             L.append(f"  sleep stress: {m['avg_sleep_stress']}, "
                      f"respiration {m.get('sleep_respiration')}")
@@ -554,8 +557,10 @@ def _fmt_metrics(m: dict) -> str:
     if m.get("resting_hr") is not None:
         L.append(f"  resting HR: {m['resting_hr']} "
                  f"[7-day avg {m.get('rhr_7d_avg')}]")
+    # Garmin's own readiness/recovery/load only exist on rows fetched before
+    # the switch to the Personal API; the local score replaces them.
     if m.get("training_readiness") is not None:
-        L.append(f"  training readiness: {m['training_readiness']} "
+        L.append(f"  Garmin training readiness: {m['training_readiness']} "
                  f"({m.get('readiness_level')}) -- {m.get('readiness_feedback')}")
     if m.get("recovery_time_min"):
         hrs = round(m["recovery_time_min"] / 60, 1)
@@ -563,8 +568,11 @@ def _fmt_metrics(m: dict) -> str:
     if m.get("acute_load") is not None:
         L.append(f"  acute load: {m['acute_load']}, ACWR factor {m.get('acwr_pct')}%")
     if m.get("body_battery_wake") is not None:
+        charge = (f"+{m['body_battery_charge']} overnight, "
+                  if m.get("body_battery_charge") is not None else "")
         L.append(f"  body battery at wake: {m['body_battery_wake']} "
-                 f"(low {m.get('body_battery_low')}, high {m.get('body_battery_high')})")
+                 f"({charge}day low {m.get('body_battery_low')}, "
+                 f"high {m.get('body_battery_high')})")
     if m.get("stress_avg") is not None:
         L.append(f"  avg stress: {m['stress_avg']}")
     return "\n".join(L) if L else "  (no data)"
@@ -597,16 +605,28 @@ def _fmt_activities(acts: list) -> str:
     return "\n".join(lines)
 
 
-def _fmt_trend(recent: list) -> str:
+def _fmt_acwr(acwr) -> str:
+    if not acwr:
+        return ""
+    if acwr.get("unreliable"):
+        return f"\n  ACWR (local): not yet meaningful -- {acwr['reason']}"
+    return (f"\n  ACWR (local, from activity training load): {acwr['ratio']} "
+            f"(acute 7d {acwr['acute_7d']} vs chronic weekly "
+            f"{acwr['chronic_28d_weekly_avg']})")
+
+
+def _fmt_trend(recent: list, readiness_trend: dict = None) -> str:
+    """readiness = the local score; Garmin's only for days that have no local one."""
     if not recent:
         return "  (no history yet)"
     lines = []
     for m in recent[-14:]:
+        local = (readiness_trend or {}).get(m.get("date"))
         lines.append(
             f"  {m.get('date')}: sleep={m.get('sleep_score')} "
             f"HRV={m.get('hrv_overnight')} RHR={m.get('resting_hr')} "
-            f"readiness={m.get('training_readiness')} "
-            f"recovery_h={round((m.get('recovery_time_min') or 0)/60,1)}"
+            f"readiness={local if local is not None else m.get('training_readiness')} "
+            f"bb_wake={m.get('body_battery_wake')}"
         )
     return "\n".join(lines)
 
@@ -614,7 +634,8 @@ def _fmt_trend(recent: list) -> str:
 def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
                 recent, today=None, notes=None, strength_reference=None,
                 activity_history=None, strength_status=None,
-                last_strength_note=None):
+                last_strength_note=None, readiness=None, acwr=None,
+                readiness_trend=None):
     today = today or date.today()
     ctx = planmod.resolve(plan_doc, today)
     system = principles + "\n\n---\n" + OUTPUT_CONTRACT
@@ -644,12 +665,13 @@ PLAN CONTEXT (resolved from your plan -- these are facts, not estimates)
 {prescription_block}{strength_block}
 LAST NIGHT / TODAY'S RECOVERY
 {_fmt_metrics(today_metrics)}
+{readinessmod.describe(readiness)}{_fmt_acwr(acwr)}
 
 YESTERDAY'S TRAINING
 {_fmt_activities(yesterday_activities)}
 
 RECENT TREND
-{_fmt_trend(recent)}
+{_fmt_trend(recent, readiness_trend)}
 
 RECENT MANUAL LOG (strength / feet / soreness)
 {note_lines}

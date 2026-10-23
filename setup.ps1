@@ -76,7 +76,7 @@ Info "Dependencies installed."
 Step "3/8  Secrets (.env)"
 if (-not (Test-Path "$Root\.env")) {
     Copy-Item "$Root\.env.example" "$Root\.env"
-    Warn "Created .env from the template. Fill in Garmin + Telegram, save, close Notepad."
+    Warn "Created .env from the template. Fill in the Garmin API key + Telegram, save, close Notepad."
     Start-Process notepad.exe "$Root\.env" -Wait
 } else { Info ".env exists (not shown)." }
 
@@ -142,13 +142,9 @@ if ($have -contains $model -or $have -contains "$model`:latest") {
 Stop-Ollama
 
 # ---------------------------------------------------------------- 6. Garmin
-Step "6/8  Garmin login (once; jobs reuse the cached token)"
-$tokenDir = "$env:USERPROFILE\.garminconnect"
-if ((Test-Path $tokenDir) -and (Get-ChildItem $tokenDir -ErrorAction SilentlyContinue)) {
-    Info "Token already cached at $tokenDir"
-} else {
-    & $venvPy scripts\setup_garmin_login.py
-}
+Step "6/8  Garmin API key (create at connect.garmin.com/app/settings/personalApiToken)"
+& $venvPy scripts\setup_garmin_key.py
+if ($LASTEXITCODE -ne 0) { Warn "Put a valid GARMIN_API_KEY in .env, then re-run setup.ps1." }
 
 # ---------------------------------------------------------------- 7. tests
 Step "7/8  Tests"

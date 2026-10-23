@@ -184,8 +184,10 @@ _HINTS = [
     (r"ReadTimeout|timed out", "The model took longer than model.timeout_seconds. "
                                "Close heavy apps or raise the timeout."),
     (r"plan\.json", "data/plan.json is missing or unreadable. Restore it from the SSD backup."),
-    (r"401|403|GarthHTTPError|Unauthorized|GarminConnectAuthentication",
-     "Garmin login expired. Run `python scripts/setup_garmin_login.py` once."),
+    (r"GarminAuthError|GARMIN_API_KEY",
+     "Garmin API key missing or expired. Create a new one at "
+     "connect.garmin.com/app/settings/personalApiToken, put it in .env as "
+     "GARMIN_API_KEY, then run `python scripts/setup_garmin_key.py`."),
     (r"429|Too Many Requests", "Garmin is rate-limiting. Don't re-run; tomorrow's run will backfill."),
     (r"TELEGRAM", "Telegram settings missing in .env."),
 ]
@@ -202,7 +204,7 @@ def hint_for(exc: BaseException) -> str:
 def redact(text: str) -> str:
     """Error strings from `requests` include the full URL -- for Telegram that
     URL contains the bot token. Never let a secret reach a log or a message."""
-    for key in ("TELEGRAM_TOKEN", "GARMIN_PASSWORD", "SMTP_PASSWORD"):
+    for key in ("TELEGRAM_TOKEN", "GARMIN_API_KEY", "SMTP_PASSWORD"):
         val = os.environ.get(key)
         if val:
             text = text.replace(val, "***")

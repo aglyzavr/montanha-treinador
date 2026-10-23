@@ -14,6 +14,7 @@ src/metrics.py
 src/notify.py
 src/plan.py
 src/prompt.py
+src/readiness.py
 src/runtime.py
 src/store.py
 src/weekly.py

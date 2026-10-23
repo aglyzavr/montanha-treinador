@@ -1,99 +1,122 @@
 """
 ISOLATED Garmin layer -- the ONLY module that talks to Garmin Connect.
 
-If Garmin changes their API/auth and the coach breaks, you fix it HERE and
-nowhere else. Uses python-garminconnect (>=0.3.6).
+If Garmin changes their API and the coach breaks, you fix it HERE and nowhere
+else. Uses Garmin's official Personal API (Oct 2026) over plain `requests`.
 
 Auth model:
-  * Run scripts/setup_garmin_login.py ONCE. It logs in (handling MFA
-    interactively) and caches a token under GARMIN_TOKENSTORE (~/.garminconnect).
-  * connect() below RESUMES from that token on every scheduled run, without a
-    fresh login -- this avoids Garmin's 429 / bot defenses.
+  * Create a key once at https://connect.garmin.com/app/settings/personalApiToken
+    (30 days .. 1 year) and put it in .env as GARMIN_API_KEY.
+  * connect() exchanges the key for a 24 h bearer token on every run. There is
+    no login, no password and no MFA -- and nothing to cache.
+
+What the Personal API does NOT provide (all 404, verified 2026-10-23 with
+scripts/probe_personal_api.py): Training Readiness, recovery time, acute load /
+ACWR, training status, VO2max, hill/endurance score, lactate threshold. The
+coach replaces readiness with src/readiness.py and computes ACWR from stored
+activity loads. Rows fetched by the old garminconnect client keep their values,
+and normalize() still reads that older payload shape so --reparse keeps working.
 
 Every field path is best-effort and the full raw JSON is always stored, so a
 payload change costs you a `.get()` path here and never any history.
 """
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 
-from garminconnect import Garmin
+import requests
+
+HOST = "https://personal.connectapi.garmin.com"
+TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
+KEY_PAGE = "https://connect.garmin.com/app/settings/personalApiToken"
 
 
-def _tokenstore() -> str:
-    return os.path.expanduser(os.environ.get("GARMIN_TOKENSTORE", "~/.garminconnect"))
+class GarminAuthError(RuntimeError):
+    """The API key is missing, expired or deleted."""
 
 
-def connect() -> Garmin:
-    """Resume from the cached token; fall back to a credential login.
+class Client:
+    """A bearer-token session against the Personal API host."""
 
-    NOTE: the previous version of this function had no `return` on the success
-    path, so it returned None whenever token resumption worked, and every run
-    silently fell through to a full credential login -- exactly the behaviour
-    that trips Garmin's rate limiter. Both paths now return.
-    """
-    store = _tokenstore()
+    def __init__(self, token: str):
+        self.s = requests.Session()
+        self.s.headers.update({"Authorization": f"Bearer {token}",
+                               "Accept": "application/json"})
+
+    def get(self, path, params=None):
+        r = self.s.get(HOST + path, params=params, timeout=60)
+        if r.status_code in (401, 403):
+            raise GarminAuthError(f"Garmin API key rejected (HTTP {r.status_code})")
+        if r.status_code == 204:
+            return None
+        r.raise_for_status()
+        return r.json()
+
+
+def _token_from(body):
+    if isinstance(body, str):
+        return body
+    for k in ("access_token", "accessToken", "token"):
+        if isinstance(body, dict) and body.get(k):
+            return body[k]
+    return None
+
+
+def connect() -> Client:
+    """Exchange GARMIN_API_KEY for a bearer token. One request per run."""
+    key = os.environ.get("GARMIN_API_KEY", "").strip()
+    if not key:
+        raise GarminAuthError(f"GARMIN_API_KEY is not set in .env -- create one at {KEY_PAGE}")
+    r = requests.post(HOST + TOKEN_PATH, headers={"Authorization": f"ApiKey {key}"},
+                      timeout=30)
+    if r.status_code in (400, 401, 403):
+        raise GarminAuthError(f"Garmin API key rejected (HTTP {r.status_code}) -- "
+                              f"it may have expired; create a new one at {KEY_PAGE}")
+    r.raise_for_status()
     try:
-        g = Garmin()
-        if hasattr(g, "resume_login"):
-            g.resume_login()
-        else:
-            g.login(store)
-        return g
-    except Exception:
-        pass
-
-    # Fallback: full login. Only works without MFA (no TTY in a launchd job).
-    g = Garmin(
-        email=os.environ["GARMIN_EMAIL"],
-        password=os.environ["GARMIN_PASSWORD"],
-    )
-    g.login()
-    try:
-        g.garth.dump(store)
-    except Exception:
-        pass
-    return g
+        token = _token_from(r.json())
+    except ValueError:
+        token = r.text.strip().strip('"')
+    if not token:
+        raise GarminAuthError("Garmin token exchange returned no token")
+    return Client(token)
 
 
 def _safe(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
+    except GarminAuthError:
+        raise  # an expired key must stop the run, not degrade to empty data
     except Exception as e:  # never let one endpoint kill the whole run
         return {"_error": str(e)}
 
 
-def fetch_day(g: Garmin, cdate: date) -> dict:
+def _activities(g: Client, start: str, end: str, page: int = 100) -> list:
+    out, offset = [], 0
+    while True:
+        batch = g.get("/activitylist-service/activities/search/activities",
+                      {"startDate": start, "endDate": end, "start": offset, "limit": page})
+        if not isinstance(batch, list) or not batch:
+            return out
+        out.extend(batch)
+        if len(batch) < page:
+            return out
+        offset += page
+
+
+def fetch_day(g: Client, cdate: date) -> dict:
     """Fetch the raw payloads for a single calendar date."""
     d = cdate.isoformat()
     return {
         "date": d,
-        "sleep": _safe(g.get_sleep_data, d),
-        "hrv": _safe(g.get_hrv_data, d),
-        "readiness": _safe(g.get_training_readiness, d),
-        "stats": _safe(g.get_stats, d),
-        "activities": _safe(g.get_activities_by_date, d, d),
-    }
-
-
-def fetch_fitness_scores(g: Garmin, cdate: date) -> dict:
-    """Weekly-cadence uphill / endurance metrics. One call each, all optional.
-
-    hill_score and endurance_score are Garmin's own uphill-running and
-    ultra-capacity metrics -- the most directly relevant numbers Garmin
-    produces for this athlete. lactate_threshold tracks the AeT-LT gap that is
-    the stated primary objective of training year 1.
-    """
-    d = cdate.isoformat()
-    start = (cdate.replace(day=1)).isoformat()
-    return {
-        "date": d,
-        "hill_score": _safe(g.get_hill_score, start, d),
-        "endurance_score": _safe(g.get_endurance_score, start, d),
-        "training_status": _safe(g.get_training_status, d),
-        "lactate_threshold": _safe(g.get_lactate_threshold, start, d),
-        "running_tolerance": _safe(g.get_running_tolerance, d),
-        "max_metrics": _safe(g.get_max_metrics, d),
-        "race_predictions": _safe(g.get_race_predictions),
+        "source": "personal_api",
+        "sleep": _safe(g.get, "/sleep-service/sleep/dailySleep", {"date": d}),
+        "hrv": _safe(g.get, f"/hrv-service/hrv/{d}"),
+        "stats": _safe(g.get, "/usersummary-service/v2/dailysummaries",
+                       {"startDate": d, "endDate": d}),
+        "heart_rate": _safe(g.get, "/wellness-service/wellness/dailyHeartRate", {"date": d}),
+        "body_battery": _safe(g.get, "/wellness-service/wellness/bodyBattery/reports/daily",
+                              {"startDate": d, "endDate": d}),
+        "activities": _safe(_activities, g, d, d),
     }
 
 
@@ -123,15 +146,102 @@ def _as_dict(x):
     return x if isinstance(x, dict) and "_error" not in x else {}
 
 
+def _for_date(x, d: str):
+    """The entry for date d from a range response (list, or {'data': [...]})."""
+    if isinstance(x, dict) and isinstance(x.get("data"), list):
+        x = x["data"]
+    if isinstance(x, list):
+        for e in x:
+            if isinstance(e, dict) and d in (e.get("calendarDate"), e.get("date")):
+                return e
+        return {}
+    return _as_dict(x)
+
+
+def _gmt_ms(ts):
+    """Garmin timestamps: epoch ms, or '2026-10-20T07:10:57.0' strings in GMT."""
+    if isinstance(ts, (int, float)):
+        return ts
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts.split(".")[0]).replace(
+                tzinfo=timezone.utc).timestamp() * 1000
+        except ValueError:
+            return None
+    return None
+
+
+# A body-battery reading counts as "at wake" if it is within this of sleep end.
+# Garmin logs ~6 points a day; on most days one falls 2-9 min after waking.
+BB_WAKE_WINDOW_MS = 60 * 60 * 1000
+
+
+def body_battery_at_wake(report: dict, sleep_end_gmt):
+    """Reading nearest the end of sleep, from the daily body-battery report."""
+    end = _gmt_ms(sleep_end_gmt)
+    values = report.get("bodyBatteryValuesArray") if isinstance(report, dict) else None
+    if end is None or not isinstance(values, list):
+        return None
+    best = None
+    for v in values:
+        if not (isinstance(v, list) and len(v) >= 2 and _num(v[0]) and _num(v[1]) is not None):
+            continue
+        gap = abs(v[0] - end)
+        if gap <= BB_WAKE_WINDOW_MS and (best is None or gap < best[0]):
+            best = (gap, v[1])
+    return best[1] if best else None
+
+
+def _sleep_charge(report: dict):
+    """Overnight body-battery recharge, from the report's SLEEP event."""
+    for e in (report.get("bodyBatteryActivityEvent") or []) if isinstance(report, dict) else []:
+        if isinstance(e, dict) and e.get("eventType") == "SLEEP":
+            return _num(e.get("bodyBatteryImpact"))
+    return None
+
+
+def _daily_stats(day: dict) -> dict:
+    """Resting HR / body battery / stress / respiration from either API shape."""
+    raw = day.get("stats")
+    if isinstance(raw, dict) and "data" in raw:   # Personal API v2/dailysummaries
+        s = _for_date(raw, day["date"])
+        hr = _as_dict(day.get("heart_rate"))
+        bb_report = _for_date(day.get("body_battery"), day["date"])
+        sleep = _as_dict(day.get("sleep"))
+        return {
+            "resting_hr": _dig(s, "heartRate", "restingValue"),
+            "rhr_7d_avg": hr.get("lastSevenDaysAvgRestingHeartRate"),
+            "body_battery_low": _dig(s, "bodyBattery", "minValue"),
+            "body_battery_high": _dig(s, "bodyBattery", "maxValue"),
+            "body_battery_wake": body_battery_at_wake(
+                bb_report, sleep.get("sleepEndTimestampGMT")),
+            "body_battery_charge": _sleep_charge(bb_report),
+            "stress_avg": _dig(s, "stress", "avgLevel"),
+            "waking_respiration": _num(_dig(s, "respiration", "avgValue")),
+        }
+    s = _as_dict(raw)                              # garminconnect usersummary
+    return {
+        "resting_hr": s.get("restingHeartRate"),
+        "rhr_7d_avg": s.get("lastSevenDaysAvgRestingHeartRate"),
+        "body_battery_low": s.get("bodyBatteryLowestValue"),
+        "body_battery_high": s.get("bodyBatteryHighestValue"),
+        "body_battery_wake": s.get("bodyBatteryAtWakeTime"),
+        "body_battery_charge": _num(s.get("bodyBatteryDuringSleep")),
+        "stress_avg": s.get("averageStressLevel"),
+        "waking_respiration": _num(s.get("avgWakingRespirationValue")),
+    }
+
+
 def normalize(day: dict) -> dict:
     """Extract the fields we store. Raw JSON is kept for reprocessing."""
     import json
 
     sleep = _as_dict(day.get("sleep"))
-    ds = _as_dict(sleep.get("dailySleepDTO"))
+    # garminconnect wrapped the sleep summary in dailySleepDTO; the Personal
+    # API returns that same object unwrapped.
+    ds = _as_dict(sleep.get("dailySleepDTO")) if "dailySleepDTO" in sleep else sleep
     scores = _as_dict(ds.get("sleepScores"))
-    stats = _as_dict(day.get("stats"))
-    readiness = _as_dict(day.get("readiness"))
+    readiness = _as_dict(day.get("readiness"))     # garminconnect-era rows only
     hrv = _as_dict(day.get("hrv"))
     hrv_sum = _as_dict(hrv.get("hrvSummary"))
     hrv_base = _as_dict(hrv_sum.get("baseline"))
@@ -148,6 +258,9 @@ def normalize(day: dict) -> dict:
         # sleepNeed.actual is ALREADY in minutes (480 = 8 h), unlike every
         # other sleep field on this payload, which is in seconds.
         "sleep_need_min": _num(_dig(ds, "sleepNeed", "actual")),
+        # Why Garmin raised sleep need. "HIGH_ACWR" is the one place the
+        # Personal API still lets Garmin's own load ratio show through.
+        "sleep_need_feedback": _dig(ds, "sleepNeed", "trainingFeedback"),
         "avg_sleep_stress": _num(ds.get("avgSleepStress")),
         "awake_count": _num(ds.get("awakeCount")),
         "sleep_respiration": _num(ds.get("averageRespirationValue")),
@@ -160,14 +273,8 @@ def normalize(day: dict) -> dict:
         "hrv_baseline_high": hrv_base.get("balancedUpper"),
         "hrv_status": hrv_sum.get("status"),
         # --- cardiac / autonomic ---
-        "resting_hr": stats.get("restingHeartRate"),
-        "rhr_7d_avg": stats.get("lastSevenDaysAvgRestingHeartRate"),
-        "body_battery_low": stats.get("bodyBatteryLowestValue"),
-        "body_battery_high": stats.get("bodyBatteryHighestValue"),
-        "body_battery_wake": stats.get("bodyBatteryAtWakeTime"),
-        "stress_avg": stats.get("averageStressLevel"),
-        "waking_respiration": _num(stats.get("avgWakingRespirationValue")),
-        # --- readiness + load balance (previously we kept only `score`) ---
+        **_daily_stats(day),
+        # --- Garmin readiness: only present on garminconnect-era rows ---
         "training_readiness": readiness.get("score"),
         "readiness_level": readiness.get("level"),
         "readiness_feedback": readiness.get("feedbackShort"),
@@ -266,8 +373,8 @@ def _latest(payload, *value_keys):
 def normalize_scores(payload: dict) -> dict:
     """Flatten the weekly fitness-score payloads into stored columns.
 
-    These endpoints are the least stable part of the API and are all wrapped in
-    _safe(), so a shape change degrades to None rather than breaking the run.
+    Only garminconnect ever fetched these (the Personal API has none of them);
+    kept so `scripts/backfill.py --reparse` can still re-read stored history.
     """
     import json
 

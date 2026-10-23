@@ -15,9 +15,9 @@ Each run makes a dated snapshot folder with:
   * every other file in data/ (plan.json, its .bak versions, principles,
     strength reference)
 
-What is deliberately NOT copied: .env (passwords, bot token) and the Garmin
-login token. Keep the .env values in your password manager instead; the
-Garmin token is recreated with scripts/setup_garmin_login.py.
+What is deliberately NOT copied: .env (Garmin API key, bot token). Keep the
+.env values in your password manager instead; a lost Garmin key is replaced by
+creating a new one (README step 4).
 
 To restore on a new machine: copy the contents of the newest snapshot folder
 into data/.

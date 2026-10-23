@@ -224,3 +224,7 @@ logs/*.log
 
 # Visual Studio local state (indexes, Copilot caches) -- never commit
 .vs/
+
+# Editor temp copies of .env (Notepad/Office save files) -- these hold secrets
+.env~*
+*.TMP

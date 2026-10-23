@@ -17,8 +17,8 @@ message only when you press "Send to phone".
    ```
 
    It installs Python and Ollama if missing, creates `.venv`, opens `.env` in
-   Notepad if it doesn't exist yet, downloads the model, does the one-time
-   Garmin login (enter the MFA code if asked), runs the tests, puts a
+   Notepad if it doesn't exist yet, downloads the model, checks your Garmin
+   API key (create it first: README step 4), runs the tests, puts a
    **Montanha Coach** shortcut on the desktop, and finishes with a health check
    plus a Telegram test message. Re-run it any time; it skips what's done.
 
@@ -74,7 +74,7 @@ puts the Startup shortcut back; `python -m src.doctor` warns if it's there).
 
 ## Privacy notes
 
-- `.env` (passwords, bot token) and the Garmin token are never backed up or
+- `.env` (Garmin API key, bot token) is never backed up or
   committed. Keep the `.env` values in your password manager.
 - The SSD holds your health history unencrypted. Consider BitLocker To Go on it
   (right-click the drive > *Turn on BitLocker*).

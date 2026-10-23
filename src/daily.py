@@ -12,7 +12,8 @@ Two changes worth knowing about:
 from datetime import date, timedelta
 
 from .config import CONFIG, project_path
-from . import garmin, store, prompt, llm, notify, plan as planmod, inbox, runtime, backup_status
+from . import (garmin, store, prompt, llm, notify, plan as planmod, inbox, runtime,
+               backup_status, metrics, readiness)
 
 # How far back each run looks for days that were never fetched. Was 10: the
 # Mac was gone from race day (2026-10-03) for 12+ days, and 10 would have
@@ -22,6 +23,7 @@ from . import garmin, store, prompt, llm, notify, plan as planmod, inbox, runtim
 # is a real gap to fill.
 BACKFILL_DAYS = 45
 HISTORY_DAYS = 60   # lookback for the pace/vert-density distance estimate
+READINESS_HISTORY_DAYS = 60   # HRV z-score baseline for the local readiness
 
 
 class SleepNotSynced(RuntimeError):
@@ -152,6 +154,18 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
         raise SleepNotSynced("Last night's sleep isn't in Garmin yet.")
 
     recent = db.recent_metrics(cfg.get("context_days", 14), end=today)
+
+    # Garmin's readiness and acute load don't exist in the Personal API; both
+    # are computed here from stored history (see src/readiness.py).
+    long_hist = db.recent_metrics(READINESS_HISTORY_DAYS + len(recent), end=today)
+    loads = db.daily_load((today - timedelta(days=28 + len(recent))).isoformat(),
+                          yesterday.isoformat())
+    acwr = metrics._acwr(loads, yesterday, db.data_coverage(
+        (yesterday - timedelta(days=27)).isoformat(), yesterday.isoformat()))
+    today_readiness = readiness.compute(
+        m_today, [m for m in long_hist if m["date"] < today.isoformat()], loads, today, acwr)
+    readiness_trend = readiness.series(long_hist, loads, len(recent))
+
     plan_doc = planmod.load(project_path(cfg["paths"]["plan"]))
     principles = prompt.load_principles(project_path(cfg["paths"]["principles"]))
     notes = db.notes_between((today - timedelta(days=7)).isoformat(), today.isoformat())
@@ -187,7 +201,9 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
                                       strength_reference=strength_reference,
                                       activity_history=history,
                                       strength_status=strength_status,
-                                      last_strength_note=last_strength_note)
+                                      last_strength_note=last_strength_note,
+                                      readiness=today_readiness, acwr=acwr,
+                                      readiness_trend=readiness_trend)
 
     progress("Thinking (local model)")
     try:

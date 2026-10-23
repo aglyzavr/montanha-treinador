@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Private, local-first AI training coach driven by Garmin data."
 requires-python = ">=3.12"
 dependencies = [
-    "garminconnect>=0.3.6",
     "requests>=2.32",
     "python-dotenv>=1.0",
     "PyYAML>=6.0",

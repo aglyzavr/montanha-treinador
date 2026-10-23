@@ -4,9 +4,9 @@ Health check: is every piece the morning job needs in place?
     python -m src.doctor              # check everything, change nothing
     python -m src.doctor --send-test  # also send a Telegram test message
 
-Read-only on purpose. It never logs in to Garmin (rule: login happens once, in
-scripts/setup_garmin_login.py) -- it only checks the cached token exists. It
-never prints a secret, only whether it is set. If Ollama isn't running (the
+Read-only on purpose. For Garmin it makes one request: exchanging the API key
+for a token, which proves the key is still valid. It never prints a secret,
+only whether it is set. If Ollama isn't running (the
 normal state) it is started for the model check and stopped again.
 """
 import os
@@ -26,20 +26,20 @@ def report(status, what, detail=""):
 def check_python():
     v = sys.version_info
     report(OK if v >= (3, 12) else FAIL, "Python", f"{v.major}.{v.minor}.{v.micro}")
-    for mod in ("garminconnect", "requests", "dotenv", "yaml"):
+    for mod in ("requests", "dotenv", "yaml"):
         try:
             __import__(mod)
         except ImportError:
             report(FAIL, f"package {mod}", "missing -- run setup.ps1 (pip install -e .)")
             return
-    report(OK, "Python packages", "garminconnect, requests, python-dotenv, PyYAML")
+    report(OK, "Python packages", "requests, python-dotenv, PyYAML")
 
 
 def check_env(root: Path):
     if not (root / ".env").exists():
         report(FAIL, ".env", "missing -- copy .env.example to .env and fill it in")
         return
-    for key in ("GARMIN_EMAIL", "GARMIN_PASSWORD", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"):
+    for key in ("GARMIN_API_KEY", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"):
         val = os.environ.get(key, "")
         placeholder = (not val or "example.com" in val or val.startswith("your-")
                        or val in ("123456789", "123456789:ABCdef_your_bot_token_here"))
@@ -133,15 +133,16 @@ def check_data(cfg, project_path):
                "created empty on the first run (then: python scripts/backfill.py --fetch 120)")
 
 
-def check_garmin_token():
-    store = Path(os.path.expanduser(os.environ.get("GARMIN_TOKENSTORE", "~/.garminconnect")))
-    files = list(store.glob("*")) if store.is_dir() else []
-    if not files:
-        report(FAIL, "Garmin token", f"none at {store} -- run scripts/setup_garmin_login.py once")
-        return
-    age = (datetime.now() - datetime.fromtimestamp(max(f.stat().st_mtime for f in files))).days
-    report(OK if age < 300 else WARN, "Garmin token",
-           f"cached {age} days ago" + (" -- expires around a year; re-login soon" if age >= 300 else ""))
+def check_garmin_key():
+    from . import garmin
+    try:
+        garmin.connect()
+    except garmin.GarminAuthError as e:
+        report(FAIL, "Garmin API key", str(e))
+    except Exception as e:
+        report(WARN, "Garmin API key", f"could not reach Garmin: {type(e).__name__}")
+    else:
+        report(OK, "Garmin API key", "accepted (Garmin emails you a week before it expires)")
 
 
 def check_ollama(cfg):
@@ -270,7 +271,7 @@ def main():
     check_python()
     check_env(ROOT)
     check_data(CONFIG, project_path)
-    check_garmin_token()
+    check_garmin_key()
     check_ollama(CONFIG)
     check_background(CONFIG)
     check_telegram(CONFIG, send_test)

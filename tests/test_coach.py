@@ -19,14 +19,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# The Garmin client is never constructed in these tests; stub the import so the
-# module can be loaded without the dependency installed.
-if "garminconnect" not in sys.modules:
-    import types
-    _m = types.ModuleType("garminconnect")
-    _m.Garmin = object
-    sys.modules["garminconnect"] = _m
-
 from src import inbox, llm, metrics, notify, plan as P, prompt  # noqa: E402
 
 # plan.json is private and git-ignored, so a fresh clone (or a new machine before
@@ -443,7 +435,8 @@ def test_failure_alert_tells_you_what_to_do():
     from src import runtime
     assert "Ollama" in runtime.hint_for(ConnectionError("localhost port=11434 refused"))
     assert "num_ctx" in runtime.hint_for(llm.ContextOverflow("too big"))
-    assert "setup_garmin_login" in runtime.hint_for(Exception("401 Unauthorized"))
+    from src import garmin
+    assert "GARMIN_API_KEY" in runtime.hint_for(garmin.GarminAuthError("key rejected (HTTP 401)"))
 
 
 # --------------------------------------------------------------------------
@@ -820,6 +813,128 @@ def test_real_plan_monday_carries_strength():
     _, user = prompt.build_daily("p", PLAN, {}, [], [], today=date(2026, 8, 24),
                                  strength_reference="REF")
     assert "TODAY'S STRENGTH SESSION -- REQUIRED (strength B)" in user
+
+
+# --------------------------------------------------------------------------
+# Garmin Personal API payloads, and the readiness that replaces Garmin's
+# --------------------------------------------------------------------------
+
+from src import garmin, readiness  # noqa: E402
+
+_SLEEP = {"sleepTimeSeconds": 23880, "deepSleepSeconds": 5100,
+          "sleepEndTimestampGMT": 1792475457000,
+          "sleepScores": {"overall": {"value": 83}},
+          "sleepNeed": {"actual": 520, "trainingFeedback": "HIGH_ACWR"}}
+
+
+def _personal_day():
+    return {
+        "date": "2026-10-20",
+        "sleep": _SLEEP,
+        "hrv": {"hrvSummary": {"lastNightAvg": 72, "baseline": {"balancedLow": 59}}},
+        "stats": {"data": [{"calendarDate": "2026-10-20",
+                            "heartRate": {"restingValue": 43},
+                            "bodyBattery": {"minValue": 13, "maxValue": 96},
+                            "stress": {"avgLevel": 23},
+                            "respiration": {"avgValue": 13}}]},
+        "heart_rate": {"lastSevenDaysAvgRestingHeartRate": 45},
+        "body_battery": [{"date": "2026-10-20",
+                          "bodyBatteryValuesArray": [[1792450800000, 44],
+                                                     [1792474920000, 96],
+                                                     [1792500000000, 30]],
+                          "bodyBatteryActivityEvent": [{"eventType": "SLEEP",
+                                                        "bodyBatteryImpact": 52}]}],
+        "activities": [],
+    }
+
+
+def test_personal_api_day_normalizes_like_the_old_client():
+    m = garmin.normalize(_personal_day())
+    assert m["sleep_duration_min"] == 398 and m["deep_min"] == 85
+    assert m["sleep_score"] == 83 and m["sleep_need_feedback"] == "HIGH_ACWR"
+    assert (m["resting_hr"], m["rhr_7d_avg"], m["stress_avg"]) == (43, 45, 23)
+    assert (m["body_battery_low"], m["body_battery_high"]) == (13, 96)
+    assert m["body_battery_wake"] == 96          # reading nearest the end of sleep
+    assert m["body_battery_charge"] == 52
+    assert m["training_readiness"] is None       # not in the Personal API
+
+
+def test_old_garminconnect_rows_still_reparse():
+    old = {"date": "2026-10-20",
+           "sleep": {"dailySleepDTO": _SLEEP},
+           "stats": {"restingHeartRate": 43, "bodyBatteryAtWakeTime": 96},
+           "readiness": [{"score": 13, "level": "POOR"}]}
+    m = garmin.normalize(old)
+    assert m["sleep_duration_min"] == 398 and m["resting_hr"] == 43
+    assert m["body_battery_wake"] == 96 and m["training_readiness"] == 13
+
+
+def test_body_battery_at_wake_ignores_readings_far_from_waking():
+    report = {"bodyBatteryValuesArray": [[0, 50]]}
+    assert garmin.body_battery_at_wake(report, 3 * 3600 * 1000) is None
+    assert garmin.body_battery_at_wake(report, None) is None
+
+
+def test_expired_key_stops_the_run_instead_of_returning_empty_data():
+    def rejected():
+        raise garmin.GarminAuthError("key rejected (HTTP 401)")
+    try:
+        garmin._safe(rejected)
+    except garmin.GarminAuthError:
+        return
+    assert False, "an auth error must not degrade to an {'_error'} stub"
+
+
+def _rested(**kw):
+    m = {"hrv_overnight": 70, "hrv_baseline_low": 59, "hrv_baseline_high": 81,
+         "sleep_score": 85, "sleep_duration_min": 480, "sleep_need_min": 480,
+         "resting_hr": 44, "rhr_7d_avg": 45, "body_battery_wake": 90}
+    m.update(kw)
+    return m
+
+
+_FLAT_LOAD = {(date(2026, 10, 20) - timedelta(days=i)).isoformat(): 50 for i in range(1, 29)}
+
+
+def test_rested_athlete_scores_go():
+    r = readiness.compute(_rested(), [], _FLAT_LOAD, date(2026, 10, 20))
+    assert r["score"] >= 75 and r["band"].startswith("go") and not r["override"]
+    assert {p["name"] for p in r["parts"]} == set(readiness.WEIGHTS)
+
+
+def test_big_recent_load_lowers_readiness():
+    heavy = dict(_FLAT_LOAD, **{"2026-10-18": 250, "2026-10-19": 20})
+    flat = readiness.compute(_rested(), [], _FLAT_LOAD, date(2026, 10, 20))
+    after = readiness.compute(_rested(), [], heavy, date(2026, 10, 20))
+    assert after["score"] <= flat["score"] - 5   # two days on, still counted
+
+
+def test_low_hrv_with_raised_rhr_forces_easy_whatever_the_score():
+    r = readiness.compute(_rested(hrv_overnight=50, resting_hr=49), [], _FLAT_LOAD,
+                          date(2026, 10, 20))
+    assert r["override"] and r["band"] == readiness.BANDS[-1][1]
+
+
+def test_readiness_needs_three_signals_and_never_guesses():
+    assert readiness.compute({"sleep_score": 80}, [], {}, date(2026, 10, 20)) is None
+    assert "not enough data" in readiness.describe(None)
+
+
+def test_ramping_load_is_penalised():
+    calm = readiness.compute(_rested(), [], _FLAT_LOAD, date(2026, 10, 20))
+    ramp = readiness.compute(_rested(sleep_need_feedback="HIGH_ACWR"), [], _FLAT_LOAD,
+                             date(2026, 10, 20), acwr={"ratio": 1.8})
+    assert calm["score"] - ramp["score"] == readiness.RAMP_PENALTY
+    assert "ACWR 1.8" in ramp["adjustments"][0]
+
+
+def test_daily_prompt_carries_local_readiness_and_acwr():
+    r = readiness.compute(_rested(), [], _FLAT_LOAD, date(2026, 10, 20))
+    _, user = prompt.build_daily("p", {}, _rested(), [], [], today=date(2026, 10, 20),
+                                 readiness=r, acwr={"ratio": 1.2, "acute_7d": 400,
+                                                    "chronic_28d_weekly_avg": 333})
+    assert "NOT Garmin's Training Readiness" in user and f"{r['score']}/100" in user
+    assert "ACWR (local, from activity training load): 1.2" in user
 
 
 if __name__ == "__main__":

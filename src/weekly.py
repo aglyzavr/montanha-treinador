@@ -18,6 +18,8 @@ from datetime import date, datetime, timedelta
 from .config import CONFIG, project_path
 from . import garmin, store, prompt, llm, notify, metrics, plan as planmod, inbox, runtime
 
+SCORES_MAX_AGE_DAYS = 14
+
 
 def backfill(g, db, start: date, end: date, log=print) -> list:
     """Fetch every day in [start, end] we have no metrics row for."""
@@ -58,16 +60,12 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
     except Exception as e:
         print(f"Telegram ingest skipped: {e}")
 
-    # 2. Backfill the window, then refresh the weekly fitness scores.
+    # 2. Backfill the window. (Garmin's weekly fitness scores -- hill/endurance
+    # score, VO2max, training status -- aren't in the Personal API.)
     progress("Fetching Garmin data")
     try:
         g = garmin.connect()
         backfill(g, db, week_start, week_end)
-        try:
-            db.upsert_scores(garmin.normalize_scores(
-                garmin.fetch_fitness_scores(g, week_end)))
-        except Exception as e:
-            print(f"Fitness scores unavailable: {e}")
     except Exception as e:
         print(f"Garmin unavailable, reviewing on stored data only: {e}")
 
@@ -82,7 +80,10 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
     notes = db.notes_between(week_start.isoformat(), week_end.isoformat())
     load_hist = db.daily_load((week_end - timedelta(days=27)).isoformat(),
                               week_end.isoformat())
-    scores = db.latest_scores(before=week_end.isoformat(), limit=2)
+    # Scores stopped updating with the switch to the Personal API; a stale row
+    # must not be presented as this week's fitness.
+    scores = [s for s in db.latest_scores(before=week_end.isoformat(), limit=2)
+              if s["date"] >= (week_end - timedelta(days=SCORES_MAX_AGE_DAYS)).isoformat()]
 
     coverage = db.data_coverage((week_end - timedelta(days=27)).isoformat(),
                                 week_end.isoformat())

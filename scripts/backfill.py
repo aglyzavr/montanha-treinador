@@ -15,10 +15,13 @@ Two independent jobs:
               2026-07-31 and 2026-08-01, which vanished because the job did not
               run on the following mornings and nothing ever went back for them.
 
+(Garmin's weekly fitness scores used to come with --scores; the Personal API
+doesn't have them, so stored ones are only re-read by --reparse.)
+
 Usage:
     python scripts/backfill.py --reparse
     python scripts/backfill.py --fetch 60
-    python scripts/backfill.py --reparse --fetch 60 --scores
+    python scripts/backfill.py --reparse --fetch 60
 """
 import argparse
 import json
@@ -54,17 +57,24 @@ def reparse(db) -> tuple:
                 acts += 1
         except Exception as e:
             print(f"  activity {r['id']}: {e}")
+
+    with db._conn() as c:
+        rows = c.execute("SELECT date, raw_json FROM fitness_scores").fetchall()
+    for r in rows:
+        try:
+            db.upsert_scores(garmin.normalize_scores(json.loads(r["raw_json"])))
+        except Exception as e:
+            print(f"  scores {r['date']}: {e}")
     return days, acts
 
 
-def fetch(db, days: int, with_scores: bool) -> list:
+def fetch(db, days: int) -> list:
     end = date.today()
     start = end - timedelta(days=days)
     missing = db.missing_activity_dates(start, end)
     if not missing:
         print("No missing days in range.")
-        if not with_scores:
-            return []
+        return []
 
     g = garmin.connect()
     filled = []
@@ -79,14 +89,6 @@ def fetch(db, days: int, with_scores: bool) -> list:
             print(f"  fetched {d}")
         except Exception as e:
             print(f"  FAILED {d}: {e}")
-
-    if with_scores:
-        try:
-            db.upsert_scores(garmin.normalize_scores(
-                garmin.fetch_fitness_scores(g, end)))
-            print("  fetched fitness scores")
-        except Exception as e:
-            print(f"  scores failed: {e}")
     return filled
 
 
@@ -97,11 +99,9 @@ def main():
                     help="re-extract new columns from stored raw_json (no network)")
     ap.add_argument("--fetch", type=int, metavar="DAYS",
                     help="fetch missing days from the last DAYS days")
-    ap.add_argument("--scores", action="store_true",
-                    help="also fetch hill/endurance/threshold scores")
     args = ap.parse_args()
 
-    if not (args.reparse or args.fetch or args.scores):
+    if not (args.reparse or args.fetch):
         ap.print_help()
         return
 
@@ -114,9 +114,9 @@ def main():
         d, a = reparse(db)
         print(f"  updated {d} metric days and {a} activities")
 
-    if args.fetch or args.scores:
-        print(f"Fetching missing days (last {args.fetch or 0})...")
-        filled = fetch(db, args.fetch or 0, args.scores)
+    if args.fetch:
+        print(f"Fetching missing days (last {args.fetch})...")
+        filled = fetch(db, args.fetch)
         print(f"  recovered {len(filled)} day(s)")
 
 

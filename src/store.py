@@ -108,6 +108,8 @@ _MIGRATIONS = [
     ("daily_metrics", "recovery_time_min", "INTEGER"),
     ("daily_metrics", "acute_load", "REAL"),
     ("daily_metrics", "acwr_pct", "REAL"),
+    ("daily_metrics", "body_battery_charge", "INTEGER"),
+    ("daily_metrics", "sleep_need_feedback", "TEXT"),
     ("activities", "name", "TEXT"),
     ("activities", "start_local", "TEXT"),
     ("activities", "moving_min", "REAL"),
@@ -146,7 +148,7 @@ _METRIC_COLS = [
     "body_battery_high", "body_battery_wake", "stress_avg",
     "waking_respiration", "training_readiness", "readiness_level",
     "readiness_feedback", "recovery_time_min", "acute_load", "acwr_pct",
-    "raw_json",
+    "body_battery_charge", "sleep_need_feedback", "raw_json",
 ]
 _ACTIVITY_COLS = [
     "id", "date", "type", "name", "start_local", "duration_min", "moving_min",
