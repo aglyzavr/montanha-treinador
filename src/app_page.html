@@ -50,7 +50,6 @@
           cursor: pointer; }
   .chip:hover { border-color: var(--muted); }
   .chip[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-  .chip.num { min-width: 38px; padding: 6px 0; text-align: center; }
   input[type=text], textarea { font: inherit; width: 100%; margin-top: 6px; padding: 7px 10px;
           border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); }
   textarea { min-height: 60px; resize: vertical; margin-top: 0; }
@@ -108,10 +107,6 @@
       </div>
       <input type="text" id="feet_text" class="hidden" placeholder="Where? e.g. left heel"></div>
     </div>
-    <div class="q"><span>How hard it felt</span>
-      <div><div class="chips" data-field="rpe" id="rpe"></div>
-      <div class="small">1 barely an effort, 10 all-out. Skip if you didn't train.</div></div>
-    </div>
 
     <h2 style="margin-top:28px">This morning</h2>
     <div class="q"><span>Legs</span>
@@ -166,7 +161,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const form = { strength: null, feet: null, rpe: null, soreness: null };
+const form = { strength: null, feet: null, soreness: null };
 let poll = null;
 
 async function api(path, body) {
@@ -175,13 +170,6 @@ async function api(path, body) {
     body: JSON.stringify(body) };
   const r = await fetch(path, opt);
   return r.json();
-}
-
-// RPE chips 1..10
-for (let i = 1; i <= 10; i++) {
-  const b = document.createElement("button");
-  b.className = "chip num"; b.dataset.v = String(i); b.textContent = i;
-  $("rpe").appendChild(b);
 }
 
 // Chip groups: click selects, clicking the selected one clears it.
@@ -309,7 +297,7 @@ async function modelState() {
       .filter(Boolean).join(". ");
   const c = s.checkin;
   Object.assign(form, { strength: c.strength, feet: c.feet,
-    rpe: c.rpe ? String(c.rpe) : null, soreness: c.soreness ? String(c.soreness) : null });
+    soreness: c.soreness ? String(c.soreness) : null });
   $("strength_text").value = c.strength_text || ""; $("feet_text").value = c.feet_text || "";
   $("note").value = c.note || ""; paintChips();
   if (s.missing_days > 0) {

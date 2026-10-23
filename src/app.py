@@ -69,8 +69,10 @@ def _db():
 # --------------------------------------------------------------------------
 # Check-in: yesterday's training facts + this morning's legs
 # --------------------------------------------------------------------------
-# Dates follow what each answer is about: strength, feet and RPE describe
+# Dates follow what each answer is about: strength and feet describe
 # YESTERDAY's session; soreness and the free note describe THIS MORNING.
+# There is no RPE question: the watch asks after every session and the coach
+# reads that per-session rating from Garmin. Earlier app RPE notes are kept.
 
 def read_checkin(db, today: date) -> dict:
     y = (today - timedelta(days=1)).isoformat()
@@ -79,7 +81,7 @@ def read_checkin(db, today: date) -> dict:
     get = lambda d, k: next((n for n in reversed(notes)
                              if n["date"] == d and n["kind"] == k), None)
     out = {"strength": None, "strength_text": "", "soreness": None,
-           "feet": None, "feet_text": "", "rpe": None, "note": ""}
+           "feet": None, "feet_text": "", "note": ""}
     s = get(y, "strength")
     if s:
         out["strength"] = "yes"
@@ -93,8 +95,6 @@ def read_checkin(db, today: date) -> dict:
         state, _, rest = (f["text"] or "").partition(": ")
         out["feet"] = state if state in FEET_STATES else "fine"
         out["feet_text"] = rest
-    r = get(y, "rpe")
-    out["rpe"] = int(float(r["value"])) if r and r["value"] else None
     n = get(t, "note")
     out["note"] = n["text"] if n else ""
     return out
@@ -118,9 +118,6 @@ def save_checkin(db, today: date, form: dict):
     ftxt = (form.get("feet_text") or "").strip()
     db.replace_app_note(y, "feet", None,
                         (f"{feet}: {ftxt}" if ftxt else feet) if feet in FEET_STATES else None)
-    rpe = form.get("rpe")
-    db.replace_app_note(y, "rpe", str(int(rpe)) if rpe else None,
-                        f"session RPE {int(rpe)}/10" if rpe else None)
     note = (form.get("note") or "").strip()
     db.replace_app_note(t, "note", None, note or None)
 

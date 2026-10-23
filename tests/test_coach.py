@@ -562,14 +562,25 @@ def test_checkin_round_trip_and_resave_does_not_duplicate(tmp_path=None):
     db = S.Store(str(d / "c.db")); db.init()
     today = date(2026, 10, 15)
     form = {"strength": "yes", "strength_text": "stage 1 circuit", "soreness": "3",
-            "feet": "hotspot", "feet_text": "left heel", "rpe": "6", "note": "slight cold"}
+            "feet": "hotspot", "feet_text": "left heel", "note": "slight cold"}
     app.save_checkin(db, today, form)
     app.save_checkin(db, today, form)                    # saved twice: no duplicates
-    assert app.read_checkin(db, today) == {**form, "soreness": 3, "rpe": 6}
+    assert app.read_checkin(db, today) == {**form, "soreness": 3}
     notes = db.notes_between("2026-10-14", "2026-10-15")
-    assert len(notes) == 5
+    assert len(notes) == 4
     tally = inbox.summarize_notes(notes)
     assert tally["strength"] == 1 and tally["soreness"] == [("2026-10-15", "3")]
+
+
+def test_checkin_leaves_earlier_app_rpe_alone(tmp_path=None):
+    """RPE comes from the watch now; old check-in RPE notes stay in the record."""
+    import tempfile
+    from src import store as S, app
+    db = S.Store(str(Path(tmp_path or tempfile.mkdtemp()) / "c.db")); db.init()
+    db.replace_app_note("2026-10-14", "rpe", "5", "session RPE 5/10")
+    app.save_checkin(db, date(2026, 10, 15), {"strength": "no"})
+    assert [n["text"] for n in db.notes_between("2026-10-14", "2026-10-14")
+            if n["kind"] == "rpe"] == ["session RPE 5/10"]
 
 
 def test_checkin_no_strength_is_not_counted_as_a_session(tmp_path=None):

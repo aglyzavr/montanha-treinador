@@ -147,5 +147,5 @@ def summarize_notes(notes: list) -> dict:
 
 
 PROMPT_FOOTER = (
-    "\n\nLog by replying: `s: <strength>` · `feet: <state>` · `sore 1-5` · `rpe 1-10`"
+    "\n\nLog by replying: `s: <strength>` · `feet: <state>` · `sore 1-5`"
 )
