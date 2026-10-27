@@ -13,7 +13,7 @@ from datetime import date, timedelta
 
 from .config import CONFIG, project_path
 from . import (garmin, store, prompt, llm, notify, plan as planmod, inbox, runtime,
-               backup_status, metrics, readiness, streams)
+               backup_status, metrics, readiness, streams, strength)
 
 # How far back each run looks for days that were never fetched. Was 10: the
 # Mac was gone from race day (2026-10-03) for 12+ days, and 10 would have
@@ -44,9 +44,9 @@ _GENERIC_STRENGTH_TEXT = {"", "done", "strength session", "strength", "gym"}
 
 
 def _last_strength_note(db, today: date):
-    """Most recent strength note that says what was done (stage/exercises).
-    Looked up over 60 days: the 7-day manual-log window used to forget a
-    logged stage after a week and fall back to Stage 1."""
+    """Most recent Telegram strength note that says what was done -- extra
+    context next to the coach-set stages (src/strength.py), looked up over 60
+    days so it isn't forgotten after a week."""
     notes = db.notes_between((today - timedelta(days=STAGE_LOOKBACK_DAYS)).isoformat(),
                              today.isoformat())
     detailed = [n for n in notes if n.get("kind") == "strength"
@@ -54,16 +54,7 @@ def _last_strength_note(db, today: date):
     return detailed[-1] if detailed else None
 
 
-def _last_strength_activity(db, today: date):
-    """Most recent Garmin strength session with an exercise list -- the stage
-    fallback when no check-in note says what was done."""
-    acts = db.activities_between((today - timedelta(days=STAGE_LOOKBACK_DAYS)).isoformat(),
-                                 today.isoformat())
-    done = [a for a in acts if metrics._is_strength(a) and metrics.strength_exercises(a)]
-    return done[-1] if done else None
-
-
-def _ensure_strength(cfg, system, user, text, due, reference, last_note, progress):
+def _ensure_strength(cfg, system, user, text, due, reference, stages, progress):
     """Strength days must come back with a circuit or a reasoned skip.
 
     Checked in Python, like every other figure the athlete relies on: the
@@ -84,7 +75,7 @@ def _ensure_strength(cfg, system, user, text, due, reference, last_note, progres
     if prompt.strength_answered(text):
         return text
     print("Strength still missing after retry; appending the plan's strength session.")
-    return text.rstrip() + "\n\n" + prompt.strength_fallback(due, reference, last_note)
+    return text.rstrip() + "\n\n" + prompt.strength_fallback(due, reference, stages)
 
 
 def _session_detail(header: dict):
@@ -230,7 +221,8 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
     last_strength_note = _last_strength_note(db, today)
     recent_acts = db.activities_between((today - timedelta(days=3)).isoformat(),
                                         yesterday.isoformat())
-    last_strength_activity = _last_strength_activity(db, today)
+    # The stage per region is the coach's, worked out from Garmin sets.
+    strength_stages = strength.states(db, today)
     due = prompt.strength_due(plan_doc, today, strength_status) if strength_reference else None
 
     system, user = prompt.build_daily(principles, plan_doc, m_today, yest_acts,
@@ -243,7 +235,7 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
                                       readiness_trend=readiness_trend,
                                       yesterday_metrics=m_yest,
                                       recent_activities=recent_acts,
-                                      last_strength_activity=last_strength_activity,
+                                      strength_stages=strength_stages,
                                       weight_lines=weight_lines)
 
     progress("Thinking (local model)")
@@ -257,7 +249,7 @@ def run(today: date = None, deliver: bool = True, require_sleep: bool = False,
 
     if due:
         text = _ensure_strength(cfg, system, user, text, due, strength_reference,
-                                last_strength_note, progress)
+                                strength_stages, progress)
 
     header = llm.parse_header(text)
     message = llm.human_part(text) or text

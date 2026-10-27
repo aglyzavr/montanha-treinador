@@ -27,9 +27,11 @@ message only when you press "Send to phone".
 Double-click **Montanha Coach** on the desktop. A page opens in your browser
 (served by this PC, reachable only from this PC):
 
-1. Tap what you know about yesterday (strength, feet, how hard it felt) and
-   this morning (legs). Skip anything you don't know; it's recorded as not
-   logged, never assumed. The model starts loading while you tap.
+1. Tap what you know about yesterday (feet) and this morning (legs). Skip
+   anything you don't know; it's recorded as not logged, never assumed. The
+   model starts loading while you tap. Strength isn't asked: record it on the
+   watch and the **Strength** tab shows the week, your stage per region (set
+   by the coach from your Garmin sets) and the last 6 weeks.
 2. Press **Get today's call**. If last night's sleep hasn't synced to Garmin
    yet, it tells you to open Garmin Connect on your phone and try again
    (or run without sleep data). Thinking takes a few minutes on this PC.
@@ -70,7 +72,8 @@ puts the Startup shortcut back; `python -m src.doctor` warns if it's there).
 | Model | `qwen3.6:35b-a3b-q8_0` | `qwen3.6:35b` (Q4), split GPU + RAM |
 | Speed | fast | a few minutes per message |
 | How it runs | 06:30 launchd job, Telegram | morning check-in app, Telegram optional |
-| Logging strength / feet / soreness | Telegram reply codes | taps in the app |
+| Logging feet / soreness | Telegram reply codes | taps in the app |
+| Strength | Telegram reply codes | from the watch; Strength tab in the app |
 
 ## Privacy notes
 

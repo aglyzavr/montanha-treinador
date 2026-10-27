@@ -14,6 +14,7 @@ from . import plan as planmod
 from . import metrics as metricsmod
 from . import readiness as readinessmod
 from . import streams as streamsmod
+from . import strength as strengthmod
 
 
 def load_principles(path: str) -> str:
@@ -97,22 +98,23 @@ def strength_due(plan_doc, today, status: dict = None):
             "tomorrow_is_strength": bool(tomorrow.get("strength_today"))}
 
 
-def _stage_hint(last_strength_note, last_strength_activity=None) -> str:
+def _stage_hint(last_strength_note=None, stages=None) -> str:
+    """The coach-set stage per region (src/strength.py), plus the athlete's own
+    Telegram note when there is one. The athlete is never asked for a stage."""
+    L = []
+    if stages:
+        L.append("coach-set stages, decided from Garmin results -- prescribe each region "
+                 "from its own stage:")
+        L += ["    " + line for line in strengthmod.describe(stages)]
+    else:
+        L.append("no stage set yet -- use the Stage 1 circuits.")
     if last_strength_note:
-        return (f"last logged strength session: {last_strength_note['date']} "
-                f"\"{last_strength_note['text']}\" -- continue from that stage/exercises.")
-    garmin_detail = metricsmod.describe_strength(last_strength_activity or {})
-    if garmin_detail:
-        return (f"no stage logged, but Garmin recorded the last session on "
-                f"{last_strength_activity['date']}: {garmin_detail} -- continue progression "
-                "from those exercises and loads, and ask the athlete to note the stage.")
-    return ("no strength session with details logged in the last 60 days -- default to "
-            "the Stage 1 circuits and tell the athlete to self-test with the assessment "
-            "tests in the reference, then note the stage in the check-in strength detail.")
+        L.append(f"    athlete's last note: {last_strength_note['date']} "
+                 f"\"{last_strength_note['text']}\"")
+    return "\n".join(L)
 
 
-def build_strength_block(due, ctx, status, last_strength_note=None,
-                         last_strength_activity=None) -> str:
+def build_strength_block(due, ctx, status, last_strength_note=None, stages=None) -> str:
     """The short, required strength section placed right after the running
     prescription. The (long) reference content goes at the end of the prompt."""
     if not due:
@@ -129,9 +131,9 @@ def build_strength_block(due, ctx, status, last_strength_note=None,
              f"not logged as done)",
              "  Today has no strength slot of its own, but this week's planned session",
              "  has no evidence of being done. Propose it today alongside today's",
-             "  session, unless the strength downgrade ladder says skip. If it was",
-             "  done and just not logged, tell the athlete to tick strength in the",
-             "  check-in instead."]
+             "  session, unless the strength downgrade ladder says skip. Evidence is",
+             "  a Garmin strength activity, so a session not recorded on the watch",
+             "  shows as missing here."]
         if due.get("tomorrow_is_strength"):
             L.append("  Tomorrow is also a strength day: keep today's make-up to the reduced")
             L.append("  circuit so the two do not stack.")
@@ -145,7 +147,7 @@ def build_strength_block(due, ctx, status, last_strength_note=None,
         planned = status["planned_so_far"] + (1 if due["kind"] == "today" else 0)
         L.append(f"  strength this week: {status['done_this_week']} done before today, "
                  f"{planned} planned up to and including today")
-    L.append(f"  stage: {_stage_hint(last_strength_note, last_strength_activity)}")
+    L.append(f"  stage: {_stage_hint(last_strength_note, stages)}")
     return "\n\n" + "\n".join(L) + "\n" + STRENGTH_FORMATTING
 
 
@@ -200,7 +202,7 @@ def reference_section(reference: str, heading_prefix: str) -> str:
     return ""
 
 
-def strength_fallback(due, reference, last_strength_note=None) -> str:
+def strength_fallback(due, reference, stages=None) -> str:
     """Appended by Python when the model omitted strength twice. Only the plan's
     wording and the reference's own text -- nothing invented."""
     slot = f"strength {due['slot']}" if due.get("slot") else "strength"
@@ -209,8 +211,9 @@ def strength_fallback(due, reference, last_strength_note=None) -> str:
     else:
         lead = (f"{slot.capitalize()} planned {due['missed_on']} has not been logged "
                 f"as done -- make it up today if you feel fine.")
-    stage = (f"Use the stage you last logged ({last_strength_note['text']})."
-             if last_strength_note else "No stage logged yet: use Stage 1.")
+    stage = ("Stages from your Garmin results: "
+             + ", ".join(f"{st['region']} Stage {st['stage']}" for st in stages) + "."
+             if stages else "No stage set yet: use Stage 1.")
     light = " Keep it light: reduced sets, bodyweight only." if due.get("light") else ""
     parts = [f"Today's strength session (added by the app -- the coach's answer left it "
              f"out): {lead} {stage}{light} One pass of the circuit, ~25-35 min; drop to "
@@ -694,7 +697,7 @@ def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
                 activity_history=None, strength_status=None,
                 last_strength_note=None, readiness=None, acwr=None,
                 readiness_trend=None, yesterday_metrics=None,
-                recent_activities=None, last_strength_activity=None,
+                recent_activities=None, strength_stages=None,
                 weight_lines=None):
     today = today or date.today()
     ctx = planmod.resolve(plan_doc, today)
@@ -710,7 +713,7 @@ def build_daily(principles, plan_doc, today_metrics, yesterday_activities,
     # text goes at the end so it doesn't bury the recovery data.
     due = strength_due(plan_doc, today, strength_status) if strength_reference else None
     strength_block = build_strength_block(due, ctx, strength_status, last_strength_note,
-                                          last_strength_activity)
+                                          strength_stages)
     reference_block = f"""
 
 STRENGTH REFERENCE CONTENT (for the strength session above -- copy circuits
@@ -773,8 +776,12 @@ If nothing should change, return {"adjustments": {}}.>
 Rules:
 - Every number you state must come from the figures provided. Do not compute
   your own totals and do not estimate.
-- If the manual log is empty, say explicitly that strength and foot data are
+- Strength evidence is the Garmin figures (adherence, content, stages); the
+  manual log only adds to it. If both are empty, say strength data is
+  unavailable. If the manual log is empty, say foot and soreness data are
   unavailable. Never assume prescribed work was completed.
+- If STRENGTH STAGES shows a region MOVED UP, tell the athlete what changes
+  in their circuit and why, in one sentence.
 - If data gaps are flagged, treat all totals as lower bounds and say so.
 """
 

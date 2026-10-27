@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta
 
 from .config import CONFIG, project_path
 from . import (garmin, store, prompt, llm, notify, metrics, plan as planmod, inbox, runtime,
-               streams)
+               streams, strength)
 
 SCORES_MAX_AGE_DAYS = 14
 PROGRESSION_DAYS = 42      # lift history shown in the review
@@ -132,6 +132,10 @@ def run(today: date = None, dry_run: bool = False, deliver: bool = True,
     summary["strength_content"] = metrics.strength_content(activities)
     summary["lift_progression"] = metrics.lift_progression(db.activities_between(
         (week_end - timedelta(days=PROGRESSION_DAYS)).isoformat(), week_end.isoformat()))
+    # The coach's stage decisions: a region that met its target moves up from
+    # next Monday (stored before the model call, so a dry run changes nothing).
+    stages = strength.review(db, week_end, apply=not dry_run)
+    summary["strength_stages"] = strength.describe(stages)
     summary["movement"] = metrics.movement(week_metrics)
     summary["hr_zones"] = _zones(zones, week_metrics)
     summary["durability"] = metrics.durability(activities)

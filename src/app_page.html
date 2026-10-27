@@ -83,6 +83,38 @@
   .error { color: var(--warn); }
   .note { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--line); }
   @media (max-width: 560px) { .q { grid-template-columns: 1fr; } .q > span { padding-top: 0; } }
+
+  /* Tabs: Today (check-in + call) and Strength (read-only, from Garmin). */
+  .tabs { display: flex; gap: 4px; margin-top: 24px; border-bottom: 1px solid var(--line); }
+  .tab { font: 600 16px var(--sign); padding: 8px 14px; border: 0; background: none;
+         color: var(--muted); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -1px; }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+
+  /* Strength regions keep one colour each, in the chart and the stage cards. */
+  :root { --legs: var(--train); --upper: var(--rest); --core: var(--easy); }
+  .row { display: grid; grid-template-columns: 54px 1fr auto; gap: 10px; align-items: baseline;
+         padding: 9px 0; border-top: 1px solid var(--line); }
+  .row b { font: 600 16px var(--sign); }
+  .badge { font-size: 13px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line);
+           white-space: nowrap; }
+  .badge.done { background: var(--train); color: var(--paper); border-color: var(--train); }
+  .badge.missed, .badge.warn { color: var(--warn); border-color: var(--warn); }
+  .badge.ready { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .stage { background: var(--card); border-left: 6px solid var(--c); border-radius: 4px;
+           padding: 14px 16px; margin-top: 10px; }
+  .stage header { display: flex; align-items: baseline; gap: 10px; }
+  .stage h3 { font: 600 18px var(--sign); margin: 0; flex: 1; }
+  .stage .num { font: 700 26px/1 var(--sign); color: var(--c); }
+  .bar { height: 8px; background: var(--line); border-radius: 4px; margin: 10px 0 6px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--c); }
+  .weeks { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; align-items: end;
+           height: 120px; margin-top: 10px; }
+  .wk { display: flex; flex-direction: column-reverse; height: 100%; gap: 2px; }
+  .wk i { display: block; border-radius: 2px; }
+  .wklabels { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; text-align: center; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px;
+                         border-radius: 2px; background: var(--c); margin-right: 6px; }
 </style>
 </head>
 <body>
@@ -92,14 +124,14 @@
     <p id="plan"></p>
   </header>
 
+  <nav class="tabs" role="tablist">
+    <button class="tab" role="tab" data-view="today" aria-selected="true">Today</button>
+    <button class="tab" role="tab" data-view="strength" aria-selected="false">Strength</button>
+  </nav>
+
+  <div id="view_today">
   <section id="checkin">
     <h2>Yesterday</h2>
-    <div class="q"><span>Strength session</span>
-      <div><div class="chips" data-field="strength">
-        <button class="chip" data-v="yes">Yes</button><button class="chip" data-v="no">No</button>
-      </div>
-      <input type="text" id="strength_text" class="hidden" placeholder="What did you do? e.g. stage 1 circuit, 3 rounds"></div>
-    </div>
     <div class="q"><span>Feet</span>
       <div><div class="chips" data-field="feet">
         <button class="chip" data-v="fine">Fine</button><button class="chip" data-v="hotspot">Hotspot</button>
@@ -150,6 +182,34 @@
       </div>
     </div>
   </section>
+  </div>
+
+  <div id="view_strength" class="hidden">
+    <p class="small error" id="s_error"></p>
+    <section style="margin-top:24px">
+      <h2>This week</h2>
+      <div id="s_week"></div>
+      <p class="small" id="s_week_sum"></p>
+    </section>
+    <section>
+      <h2>Stages</h2>
+      <p class="small" style="margin-top:-8px">Set by the coach from your Garmin sets. A region moves up in the weekly review once its target is met in 2 of 3 sessions.</p>
+      <div id="s_stages"></div>
+    </section>
+    <section>
+      <h2>Recent sessions</h2>
+      <div id="s_recent"></div>
+    </section>
+    <section>
+      <h2>Last 6 weeks</h2>
+      <p class="small" style="margin-top:-8px">Sets per week by region.</p>
+      <div class="weeks" id="s_weeks"></div>
+      <div class="wklabels small" id="s_wklabels"></div>
+      <div class="legend small"><span style="--c:var(--legs)">Legs</span><span style="--c:var(--upper)">Upper</span><span style="--c:var(--core)">Core</span></div>
+      <p class="small" id="s_trail"></p>
+      <div id="s_lifts" class="small"></div>
+    </section>
+  </div>
 
   <div class="actions" style="margin-top:28px">
     <button class="btn secondary" id="quit">Done, close the coach</button>
@@ -161,7 +221,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const form = { strength: null, feet: null, soreness: null };
+const form = { feet: null, soreness: null };
 let poll = null;
 
 async function api(path, body) {
@@ -181,20 +241,18 @@ document.querySelectorAll(".chips").forEach((group) => {
     paintChips(); saveSoon();
   });
 });
-["strength_text", "feet_text", "note"].forEach((id) => $(id).addEventListener("input", saveSoon));
+["feet_text", "note"].forEach((id) => $(id).addEventListener("input", saveSoon));
 
 function paintChips() {
   document.querySelectorAll(".chips").forEach((g) => {
     g.querySelectorAll(".chip").forEach((b) =>
       b.setAttribute("aria-pressed", String(form[g.dataset.field] === b.dataset.v)));
   });
-  $("strength_text").classList.toggle("hidden", form.strength !== "yes");
   $("feet_text").classList.toggle("hidden", !form.feet || form.feet === "fine");
 }
 
 function checkinPayload() {
-  return { ...form, strength_text: $("strength_text").value,
-           feet_text: $("feet_text").value, note: $("note").value };
+  return { ...form, feet_text: $("feet_text").value, note: $("note").value };
 }
 let saveTimer = null;
 function saveSoon() {           // answers are kept as you go; nothing to "submit"
@@ -280,6 +338,84 @@ $("quit").onclick = async () => {
     + "Double-click Montanha Coach to start again.</p>";
 };
 
+// ---- Strength tab: read-only, everything comes from Garmin --------------
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  Object.entries(attrs || {}).forEach(([k, v]) => k === "style" ? e.style.cssText = v : e.setAttribute(k, v));
+  kids.flat().forEach((k) => k != null && e.append(k));
+  return e;
+}
+const REGION = { legs: "Legs", upper: "Upper body", core: "Core" };
+
+function renderStrength(d) {
+  const w = d.week;
+  $("s_week").replaceChildren(...(w.slots.length ? w.slots.map((s) => el("div", { class: "row" },
+    el("b", {}, s.day), el("span", {}, `Strength ${s.slot || ""}${s.light ? " (light)" : ""}`,
+      el("div", { class: "small" }, s.wording || "")),
+    el("span", { class: `badge ${s.state}` }, s.state)))
+    : [el("p", { class: "small" }, "No strength planned this week.")]));
+  $("s_week_sum").textContent = [`${w.done} done this week`,
+    w.owed ? `${w.owed} owed from earlier this week` : "",
+    w.streak ? `${w.streak} week${w.streak > 1 ? "s" : ""} in a row with every session done` : ""]
+    .filter(Boolean).join(" · ");
+
+  $("s_stages").replaceChildren(...d.stages.map((s) => {
+    const badge = s.top ? el("span", { class: "badge" }, "top stage")
+      : s.ready ? el("span", { class: "badge ready" }, "ready to move up")
+      : s.stalled ? el("span", { class: "badge warn" }, "no progress in 3 weeks")
+      : el("span", { class: "badge" }, "building");
+    const card = el("div", { class: "stage", style: `--c: var(--${s.region})` },
+      el("header", {}, el("h3", {}, REGION[s.region]), badge,
+         el("span", { class: "num" }, `Stage ${s.stage}`)));
+    if (s.top) card.append(el("p", { class: "small" }, s.next));
+    else {
+      card.append(el("div", { class: "bar" }, el("i", { style: `width:${s.pct}%` })),
+        el("div", {}, `Next stage: ${s.target}, in 2 of 3 sessions`),
+        el("div", { class: "small" }, s.sessions.length
+          ? "Recent: " + s.sessions.map((r) => `${r.date.slice(5)} ${r.sets}×${r.value}${r.met ? " ✓" : ""}`).join(" · ")
+          : "No session with this stage's exercise yet."));
+      if (s.form_check) card.append(el("div", { class: "small" }, `Form check before moving up: ${s.form_check}`));
+      if (s.stalled) card.append(el("div", { class: "small error" }, "Worth a physio check rather than pushing on (reference rule)."));
+    }
+    card.append(el("div", { class: "small" }, `Since ${s.since} · ${s.reason}`));
+    return card;
+  }));
+
+  $("s_recent").replaceChildren(...(d.recent.length ? d.recent.map((a) => el("div", { class: "row" },
+    el("b", {}, a.date.slice(5)),
+    el("span", {}, `legs ${a.split.lower} · upper ${a.split.upper} · core ${a.split.core} sets`,
+      el("div", { class: "small" }, a.detail.split(": ").slice(1).join(": "))),
+    a.leg_heavy ? el("span", { class: "badge warn", title: "6+ leg sets with a run within 48 h" }, "leg-heavy before a run") : el("span")))
+    : [el("p", { class: "small" }, "No Garmin strength sessions in the last 26 weeks.")]));
+
+  const max = Math.max(1, ...d.trend.weeks.map((k) => k.lower + k.upper + k.core));
+  $("s_weeks").replaceChildren(...d.trend.weeks.map((k) => el("div", { class: "wk",
+      title: `${k.label}: legs ${k.lower}, upper ${k.upper}, core ${k.core} sets` },
+    ...[["lower", "legs"], ["upper", "upper"], ["core", "core"]].filter(([key]) => k[key]).map(([key, c]) =>
+      el("i", { style: `height:${100 * k[key] / max}%; background: var(--${c})` })))));
+  $("s_wklabels").replaceChildren(...d.trend.weeks.map((k) => el("span", {}, k.label)));
+  $("s_trail").textContent = d.trend.trail_specific.length
+    ? `Single-leg / eccentric work: ${d.trend.trail_specific.join(", ")}.`
+    : "No single-leg or eccentric work (step-downs, lunges, split squats) in 6 weeks: that is what protects the quads on long descents.";
+  $("s_trail").classList.toggle("error", !d.trend.trail_specific.length);
+  const lifts = Object.entries(d.trend.lifts);
+  $("s_lifts").replaceChildren(...(lifts.length ? [el("div", {}, "Leg lifts, last sessions:"),
+    ...lifts.map(([n, rows]) => el("div", {}, `${n}: ${rows.map((r) => r.replace(/^\d{4}-/, "")).join(" → ")}`))] : []));
+}
+
+let strengthLoaded = false;
+async function showView(name) {
+  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.view === name)));
+  $("view_today").classList.toggle("hidden", name !== "today");
+  $("view_strength").classList.toggle("hidden", name !== "strength");
+  if (name === "strength" && !strengthLoaded) {
+    const d = await api("/api/strength");
+    if (d.error) { $("s_error").textContent = `Couldn't load strength: ${d.error}`; return; }
+    $("s_error").textContent = ""; strengthLoaded = true; renderStrength(d);
+  }
+}
+document.querySelectorAll(".tab").forEach((t) => t.onclick = () => showView(t.dataset.view));
+
 async function modelState() {
   const s = await api("/api/status");
   $("model").textContent = !s.ollama.up ? "Ollama didn't start. Run setup.ps1, or check logs\\app.log."
@@ -296,9 +432,8 @@ async function modelState() {
        p.days_to_race != null ? `${p.days_to_race} days to ${p.plan_label || "the race"}` : ""]
       .filter(Boolean).join(". ");
   const c = s.checkin;
-  Object.assign(form, { strength: c.strength, feet: c.feet,
-    soreness: c.soreness ? String(c.soreness) : null });
-  $("strength_text").value = c.strength_text || ""; $("feet_text").value = c.feet_text || "";
+  Object.assign(form, { feet: c.feet, soreness: c.soreness ? String(c.soreness) : null });
+  $("feet_text").value = c.feet_text || "";
   $("note").value = c.note || ""; paintChips();
   if (s.missing_days > 0) {
     $("gap").textContent = `${s.missing_days} earlier day(s) are missing from Garmin. `

@@ -137,11 +137,14 @@ saves everything to `data/coach.db`.
 
 ### 9. Log what Garmin can't see
 
-Strength sessions, foot condition and soreness aren't in any Garmin payload.
-Reply to the bot in Telegram and the next run picks it up:
+Foot condition and soreness aren't in any Garmin payload. Strength is: record
+the session on the watch (fix any wrong exercise in Connect) and the coach
+reads every set, and sets your stage per region (legs / upper / core) from
+them -- you never pick a stage. Reply to the bot in Telegram and the next run
+picks it up:
 
 ```
-s: back squat 5x5 @85kg          → strength session
+s: back squat 5x5 @85kg          → strength done without the watch
 feet: hotspot left heel, taped   → foot durability log
 sore 3                           → soreness 1-5
 rpe 7                            → session RPE

@@ -561,15 +561,13 @@ def test_checkin_round_trip_and_resave_does_not_duplicate(tmp_path=None):
     d = Path(tmp_path or tempfile.mkdtemp())
     db = S.Store(str(d / "c.db")); db.init()
     today = date(2026, 10, 15)
-    form = {"strength": "yes", "strength_text": "stage 1 circuit", "soreness": "3",
-            "feet": "hotspot", "feet_text": "left heel", "note": "slight cold"}
+    form = {"soreness": "3", "feet": "hotspot", "feet_text": "left heel", "note": "slight cold"}
     app.save_checkin(db, today, form)
     app.save_checkin(db, today, form)                    # saved twice: no duplicates
     assert app.read_checkin(db, today) == {**form, "soreness": 3}
     notes = db.notes_between("2026-10-14", "2026-10-15")
-    assert len(notes) == 4
-    tally = inbox.summarize_notes(notes)
-    assert tally["strength"] == 1 and tally["soreness"] == [("2026-10-15", "3")]
+    assert len(notes) == 3
+    assert inbox.summarize_notes(notes)["soreness"] == [("2026-10-15", "3")]
 
 
 def test_checkin_leaves_earlier_app_rpe_alone(tmp_path=None):
@@ -578,20 +576,23 @@ def test_checkin_leaves_earlier_app_rpe_alone(tmp_path=None):
     from src import store as S, app
     db = S.Store(str(Path(tmp_path or tempfile.mkdtemp()) / "c.db")); db.init()
     db.replace_app_note("2026-10-14", "rpe", "5", "session RPE 5/10")
-    app.save_checkin(db, date(2026, 10, 15), {"strength": "no"})
+    app.save_checkin(db, date(2026, 10, 15), {"feet": "fine"})
     assert [n["text"] for n in db.notes_between("2026-10-14", "2026-10-14")
             if n["kind"] == "rpe"] == ["session RPE 5/10"]
 
 
-def test_checkin_no_strength_is_not_counted_as_a_session(tmp_path=None):
+def test_checkin_has_no_strength_question_and_leaves_old_answers_alone(tmp_path=None):
+    """Strength comes from Garmin; earlier check-in strength answers stay on record."""
     import tempfile
     from src import store as S, app
     db = S.Store(str(Path(tmp_path or tempfile.mkdtemp()) / "c.db")); db.init()
-    app.save_checkin(db, date(2026, 10, 15), {"strength": "no"})
-    assert inbox.summarize_notes(db.notes_between("2026-10-14", "2026-10-15"))["strength"] == 0
+    db.replace_app_note("2026-10-14", "strength", "done", "stage 1 circuit")
+    app.save_checkin(db, date(2026, 10, 15), {"feet": "fine", "strength": "yes"})
+    assert "strength" not in app.read_checkin(db, date(2026, 10, 15))
+    assert [n["kind"] for n in db.notes_between("2026-10-14", "2026-10-15")] == ["strength", "feet"]
     # clearing a field removes the entry: skipped means unlogged, never assumed
     app.save_checkin(db, date(2026, 10, 15), {})
-    assert db.notes_between("2026-10-14", "2026-10-15") == []
+    assert [n["kind"] for n in db.notes_between("2026-10-14", "2026-10-15")] == ["strength"]
 
 
 def test_checkin_never_touches_telegram_history(tmp_path=None):
@@ -1036,11 +1037,122 @@ def test_leg_heavy_strength_before_a_run_is_flagged():
     assert "LEG-HEAVY" not in prompt._fmt_recent_strength([upper], date(2026, 10, 21))
 
 
-def test_garmin_strength_session_is_the_stage_fallback_without_a_note():
-    hint = prompt._stage_hint(None, _strength_activity("2026-09-10"))
-    assert "Garmin recorded the last session on 2026-09-10" in hint
-    assert "kettlebell deadlift" in hint
+def test_stage_hint_gives_the_coach_set_stages():
+    from src import strength
+    st = [strength.progress("core", {"stage": 1, "since": "2026-10-01", "reason": "r"},
+                            [_strength_activity("2026-10-20")], date(2026, 10, 21))]
+    hint = prompt._stage_hint(None, st)
+    assert "coach-set stages" in hint and "core: Stage 1 since 2026-10-01" in hint
+    assert "3 x 30 s plank holds" in hint and "note the stage" not in hint
     assert "Stage 1" in prompt._stage_hint(None, None)
+    note = {"date": "2026-10-19", "text": "stage 2 circuit"}
+    assert "athlete's last note: 2026-10-19" in prompt._stage_hint(note, st)
+
+
+# --------------------------------------------------------------------------
+# Strength stages: the coach decides them from Garmin sets
+# --------------------------------------------------------------------------
+
+def _sets(d, *rows):
+    """A Garmin strength session from (category, subCategory, sets, reps, kg, seconds)."""
+    return _strength_activity(d, [
+        {"category": c, "subCategory": x, "sets": n, "reps": r, "maxWeight": kg * 1000,
+         "duration": sec * 1000} for c, x, n, r, kg, sec in rows])
+
+
+_OCT20 = ("2026-10-20", ("PUSH_UP", None, 4, 40, 0, 112), ("PLANK", None, 6, 0, 0, 209),
+          ("BANDED_EXERCISES", "SQUAT", 4, 79, 0, 196))
+_OCT26 = ("2026-10-26", ("PUSH_UP", None, 3, 39, 0, 96), ("PLANK", None, 6, 0, 0, 165),
+          ("BANDED_EXERCISES", "SQUAT", 3, 60, 0, 182))
+
+
+def test_starting_stages_are_inferred_from_garmin_sets():
+    from src import strength
+    sess = [_sets(*_OCT20), _sets(*_OCT26)]
+    assert strength.infer_stage("legs", sess)[0] == 1           # band squats
+    stage, reason, _ = strength.infer_stage("upper", sess)
+    assert stage == 3 and "13 full push-ups" in reason          # 39 reps / 3 sets
+    stage, reason, _ = strength.infer_stage("core", sess)
+    assert stage == 2 and "35 s" in reason                      # best plank 209 s / 6
+    lunges = _sets("2026-10-27", ("LUNGE", None, 3, 45, 0, 100))
+    assert strength.infer_stage("legs", sess + [lunges])[0] == 2
+    loaded = _sets("2026-10-28", ("LUNGE", None, 3, 30, 8, 100))
+    assert strength.infer_stage("legs", sess + [loaded])[0] == 3
+    assert strength.infer_stage("legs", [])[0] == 1
+
+
+def test_a_region_is_ready_after_meeting_its_target_twice_in_three():
+    from src import strength
+    state = {"stage": 1, "since": "2026-10-01", "reason": "r"}
+    squats = lambda d, n, reps: _sets(d, ("BANDED_EXERCISES", "SQUAT", n, reps, 0, 100))
+    p = strength.progress("legs", state, [squats("2026-10-20", 4, 79),
+                                          squats("2026-10-26", 3, 60)], date(2026, 10, 27))
+    assert not p["ready"] and p["target"] == "4 x 20 reps band/bodyweight squats"
+    p = strength.progress("legs", state, [squats("2026-10-20", 4, 80), squats("2026-10-23", 3, 60),
+                                          squats("2026-10-26", 4, 84)], date(2026, 10, 27))
+    assert p["ready"] and "step-down" in p["form_check"]
+    # sessions from before the stage started don't count toward it
+    late = dict(state, since="2026-10-24")
+    assert strength.progress("legs", late, [squats("2026-10-20", 4, 80), squats("2026-10-23", 4, 80),
+                                            squats("2026-10-26", 4, 84)], date(2026, 10, 27))["ready"] is False
+
+
+def test_no_progress_for_three_weeks_is_flagged_but_a_break_is_not():
+    from src import strength
+    state = {"stage": 1, "since": "2026-09-01", "reason": "r"}
+    plank = lambda d, sec: _sets(d, ("PLANK", None, 6, 0, 0, sec))
+    flat = [plank("2026-10-06", 150), plank("2026-10-14", 140), plank("2026-10-24", 150)]
+    assert strength.progress("core", state, flat, date(2026, 10, 27))["stalled"]
+    better = flat[:2] + [plank("2026-10-24", 170)]
+    assert not strength.progress("core", state, better, date(2026, 10, 27))["stalled"]
+    gap = [plank("2026-09-05", 300), plank("2026-10-20", 200), plank("2026-10-26", 160)]
+    assert not strength.progress("core", state, gap, date(2026, 10, 27))["stalled"]
+
+
+def test_weekly_review_promotes_a_ready_region_once(tmp_path=None):
+    import tempfile
+    from src import store as S, strength
+    db = S.Store(str(Path(tmp_path or tempfile.mkdtemp()) / "c.db")); db.init()
+    for d in ("2026-10-20", "2026-10-22", "2026-10-25"):
+        a = _sets(d, ("PLANK", None, 3, 0, 0, 100))                 # 33 s holds
+        a["id"] = d
+        db.upsert_activity(a)
+    db.add_strength_stage("2026-10-01", "core", 1, "seed")
+    # a dry run decides but stores nothing
+    dry = {s["region"]: s for s in strength.review(db, date(2026, 10, 25), apply=False)}
+    assert dry["core"]["promoted_to"] == 2 and db.strength_stages()["core"]["stage"] == 1
+    out = {s["region"]: s for s in strength.review(db, date(2026, 10, 25))}
+    assert out["core"]["promoted_to"] == 2 and "2026-10-20" in out["core"]["promotion_reason"]
+    assert db.strength_stages()["core"] == {"stage": 2, "since": "2026-10-26",
+                                            "reason": out["core"]["promotion_reason"]}
+    strength.review(db, date(2026, 10, 25))                          # re-run: no double move
+    assert db.strength_stages()["core"]["stage"] == 2
+    assert any("MOVED UP to Stage 2" in line for line in strength.describe(out.values()))
+
+
+def test_strength_view_summarises_week_stages_and_trend(tmp_path=None):
+    import tempfile
+    from src import store as S, strength
+    db = S.Store(str(Path(tmp_path or tempfile.mkdtemp()) / "c.db")); db.init()
+    for row in (_OCT20, _OCT26):
+        a = _sets(*row)
+        a["id"] = row[0]
+        db.upsert_activity(a)
+    out = strength.summary(db, date(2026, 10, 27), _strength_doc())
+    assert [(s["day"], s["state"]) for s in out["week"]["slots"]] == [("Mon", "done"), ("Wed", "planned")]
+    assert {s["region"]: s["stage"] for s in out["stages"]} == {"legs": 1, "upper": 3, "core": 2}
+    assert [a["date"] for a in out["recent"]] == ["2026-10-26", "2026-10-20"]
+    assert out["trend"]["weeks"][-1] == {"week": "2026-10-26", "label": "26 Oct", "sessions": 1,
+                                         "lower": 3, "upper": 3, "core": 6}
+    assert out["trend"]["trail_specific"] == []
+
+
+def test_weekly_prompt_counts_garmin_strength_when_the_manual_log_is_empty():
+    s = metrics.summarize([], {})
+    s.update(strength_planned=2, strength_done=2)
+    text = metrics.describe(s, notes=[])
+    assert "Strength is covered by the Garmin figures" in text
+    assert "Do NOT assume prescribed strength work" not in text
 
 
 def test_weekly_shows_watch_zones_and_flags_a_stale_resting_hr():

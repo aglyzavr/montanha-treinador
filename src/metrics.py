@@ -628,6 +628,10 @@ def describe(s: dict, gaps: list = None, notes: list = None,
         L.append("  lower-body lifts, last sessions (oldest first):")
         for name, rows in sorted(s["lift_progression"].items()):
             L.append(f"    {name}: " + " -> ".join(rows))
+    if s.get("strength_stages"):
+        L.append("")
+        L.append("STRENGTH STAGES (set by the app from Garmin results; the athlete does not pick them)")
+        L.extend("  " + line for line in s["strength_stages"])
 
     mv = s.get("movement")
     if mv:
@@ -673,10 +677,14 @@ def describe(s: dict, gaps: list = None, notes: list = None,
                      f"{z['rhr_measured']} (auto-update off) -- zone settings may be stale")
 
     L.append("")
-    L.append("MANUAL LOG (strength, feet, soreness -- not available from Garmin)")
+    L.append("MANUAL LOG (feet, soreness, notes -- not available from Garmin)")
     if notes:
         for n in notes:
             L.append(f"  {n['date']} [{n['kind']}] {n['text']}")
+    elif s.get("strength_done") or s.get("strength_content"):
+        L.append("  NO ENTRIES. Strength is covered by the Garmin figures above; you have")
+        L.append("  no evidence about foot condition or subjective soreness this week.")
+        L.append("  Say so explicitly.")
     else:
         L.append("  NO ENTRIES. You have no evidence about strength sessions, foot")
         L.append("  condition, or subjective soreness this week. Say so explicitly.")

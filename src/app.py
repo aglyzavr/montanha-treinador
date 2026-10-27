@@ -38,7 +38,7 @@ from pathlib import Path
 import requests
 
 from .config import CONFIG, project_path
-from . import store, llm, notify, metrics, plan as planmod, runtime, backup_status
+from . import store, llm, notify, metrics, plan as planmod, runtime, backup_status, strength
 
 PAGE = Path(__file__).with_name("app_page.html")
 # Tab / shortcut icons. A fixed map, not a static-folder handler: the server
@@ -67,12 +67,13 @@ def _db():
 
 
 # --------------------------------------------------------------------------
-# Check-in: yesterday's training facts + this morning's legs
+# Check-in: yesterday's feet + this morning's legs
 # --------------------------------------------------------------------------
-# Dates follow what each answer is about: strength and feet describe
-# YESTERDAY's session; soreness and the free note describe THIS MORNING.
-# There is no RPE question: the watch asks after every session and the coach
-# reads that per-session rating from Garmin. Earlier app RPE notes are kept.
+# Dates follow what each answer is about: feet describe YESTERDAY's session;
+# soreness and the free note describe THIS MORNING. Nothing the watch already
+# records is asked: not RPE (the watch asks after every session) and not
+# strength (Garmin has every set; the Strength tab shows it, and the coach sets
+# the stage -- src/strength.py). Earlier app RPE/strength notes are kept.
 
 def read_checkin(db, today: date) -> dict:
     y = (today - timedelta(days=1)).isoformat()
@@ -80,14 +81,7 @@ def read_checkin(db, today: date) -> dict:
     notes = [n for n in db.notes_between(y, t) if n.get("update_id") is None]
     get = lambda d, k: next((n for n in reversed(notes)
                              if n["date"] == d and n["kind"] == k), None)
-    out = {"strength": None, "strength_text": "", "soreness": None,
-           "feet": None, "feet_text": "", "note": ""}
-    s = get(y, "strength")
-    if s:
-        out["strength"] = "yes"
-        out["strength_text"] = s["text"] if s["text"] != "strength session" else ""
-    if get(y, "no_strength"):
-        out["strength"] = "no"
+    out = {"soreness": None, "feet": None, "feet_text": "", "note": ""}
     so = get(t, "soreness")
     out["soreness"] = int(float(so["value"])) if so and so["value"] else None
     f = get(y, "feet")
@@ -103,14 +97,6 @@ def read_checkin(db, today: date) -> dict:
 def save_checkin(db, today: date, form: dict):
     y = (today - timedelta(days=1)).isoformat()
     t = today.isoformat()
-    s = form.get("strength")
-    detail = (form.get("strength_text") or "").strip()
-    # "No" is stored as its own kind: counting it as kind=strength would make
-    # inbox.summarize_notes tally a session that never happened.
-    db.replace_app_note(y, "strength", "done" if s == "yes" else None,
-                        (detail or "strength session") if s == "yes" else None)
-    db.replace_app_note(y, "no_strength", "none" if s == "no" else None,
-                        "no strength session" if s == "no" else None)
     so = form.get("soreness")
     db.replace_app_note(t, "soreness", str(int(so)) if so else None,
                         f"soreness {int(so)}/5 this morning" if so else None)
@@ -249,6 +235,12 @@ def status() -> dict:
     return out
 
 
+def strength_view(today: date = None) -> dict:
+    today = today or date.today()
+    plan_doc = planmod.load(project_path(CONFIG["paths"]["plan"]))
+    return strength.summary(_db(), today, plan_doc)
+
+
 def send_to_phone(kind: str) -> str:
     done = JOBS.last.get(kind)
     text = done["result"]["message"] if done else None
@@ -325,6 +317,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": runtime.redact(str(e))}, 500)
         elif self.path == "/api/job":
             self._json(JOBS.snapshot())
+        elif self.path == "/api/strength":
+            try:
+                self._json(strength_view())
+            except Exception as e:
+                self._json({"error": runtime.redact(str(e))}, 500)
         else:
             self._json({"error": "not found"}, 404)
 

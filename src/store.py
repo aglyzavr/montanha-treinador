@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS manual_notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   date TEXT,
   received_at TEXT,
-  kind TEXT,             -- strength | feet | soreness | rpe | note
+  kind TEXT,             -- strength | no_strength | feet | soreness | rpe | note
   value TEXT,
   text TEXT,
   update_id INTEGER UNIQUE
@@ -109,6 +109,17 @@ CREATE TABLE IF NOT EXISTS weights (
   body_fat_pct REAL,
   source TEXT,
   raw_json TEXT
+);
+-- The coach's strength stage per region (legs / upper / core), decided from
+-- Garmin sets by src/strength.py. Append-only: the latest row per region is
+-- the current stage, earlier rows are the history of when and why it moved.
+CREATE TABLE IF NOT EXISTS strength_stages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT,
+  region TEXT,
+  stage INTEGER,
+  reason TEXT,
+  created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_activities_date ON activities(date);
 CREATE INDEX IF NOT EXISTS idx_manual_notes_date ON manual_notes(date);
@@ -407,6 +418,18 @@ class Store:
                 c.execute(
                     "INSERT INTO manual_notes (date, received_at, kind, value, text) "
                     "VALUES (?,?,?,?,?)", (d, _now(), kind, value, text or ""))
+
+    def add_strength_stage(self, d, region, stage, reason):
+        with self._conn() as c:
+            c.execute("INSERT INTO strength_stages (date, region, stage, reason, created_at) "
+                      "VALUES (?,?,?,?,?)", (d, region, int(stage), reason, _now()))
+
+    def strength_stages(self) -> dict:
+        """{region: {"stage", "since", "reason"}} -- the latest row per region."""
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM strength_stages ORDER BY date, id").fetchall()
+        return {r["region"]: {"stage": r["stage"], "since": r["date"], "reason": r["reason"]}
+                for r in rows}
 
     def missing_days_count(self, start: date, end: date) -> int:
         return len(self.missing_activity_dates(start, end))
