@@ -349,7 +349,15 @@ def summary(db, today: date, plan_doc: dict) -> dict:
     trail = sorted({M.exercise_name(e) for a in in_trend for e in M.strength_exercises(a)
                     if M.is_trail_specific(e)})
 
+    # Garmin data only reaches the store when a run fetches it, so the tab
+    # says how far it goes -- yesterday's session is missing until then.
+    fresh = db.fetch_freshness()
+    yesterday = (today - timedelta(days=1)).isoformat()
     return {
+        "data": {"complete_through": fresh["complete_through"],
+                 "last_fetch": fresh["last_fetch"],
+                 "yesterday_missing": (fresh["complete_through"] or "") < yesterday,
+                 "latest_session": sess[-1]["date"] if sess else None},
         "week": {"start": week_start.isoformat(),
                  "slots": _week_rows(plan_doc, week_start, today, done_dates),
                  "done": status["done_this_week"], "owed": status["owed"],

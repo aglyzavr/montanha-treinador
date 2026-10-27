@@ -232,6 +232,8 @@ def status() -> dict:
     out["weekly"] = {"week_start": ws.isoformat(), "week_end": we.isoformat(),
                      "label": f"{ws:%d %b} - {we:%d %b}",
                      "done": db.weekly_review_exists(ws.isoformat())}
+    # Lets the page mark the Strength tab when a session it hasn't shown arrives.
+    out["strength_latest"] = db.latest_activity_date(metrics.STRENGTH_TYPES)
     return out
 
 

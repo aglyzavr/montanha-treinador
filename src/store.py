@@ -500,6 +500,23 @@ class Store:
             cur += timedelta(days=1)
         return out
 
+    def fetch_freshness(self) -> dict:
+        """{"complete_through": the latest day fetched on a LATER day (so its
+        training is all in), "last_fetch": when Garmin was last asked}."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT MAX(CASE WHEN fetched_at IS NULL OR fetched_at = '' "
+                "OR substr(fetched_at, 1, 10) > date THEN date END), MAX(fetched_at) "
+                "FROM activity_fetch").fetchone()
+        return {"complete_through": row[0], "last_fetch": row[1]}
+
+    def latest_activity_date(self, types) -> str | None:
+        types = list(types)
+        with self._conn() as c:
+            return c.execute(
+                f"SELECT MAX(date) FROM activities WHERE type IN ({','.join('?' * len(types))})",
+                types).fetchone()[0]
+
     def data_coverage(self, start: str, end: str) -> int:
         """How many days in the window have a metrics row (for ACWR validity)."""
         with self._conn() as c:

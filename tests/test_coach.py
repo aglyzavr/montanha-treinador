@@ -1145,6 +1145,26 @@ def test_strength_view_summarises_week_stages_and_trend(tmp_path=None):
     assert out["trend"]["weeks"][-1] == {"week": "2026-10-26", "label": "26 Oct", "sessions": 1,
                                          "lower": 3, "upper": 3, "core": 6}
     assert out["trend"]["trail_specific"] == []
+    assert out["data"]["yesterday_missing"] and out["data"]["latest_session"] == "2026-10-26"
+    assert db.latest_activity_date(metrics.STRENGTH_TYPES) == "2026-10-26"
+
+
+def test_strength_view_says_how_far_garmin_data_goes(tmp_path=None):
+    """Yesterday's session only exists after a run fetched it; the tab says so."""
+    import tempfile
+    from src import store as S
+    db = S.Store(str(Path(tmp_path or tempfile.mkdtemp()) / "c.db")); db.init()
+    with db._conn() as c:
+        c.executemany("INSERT INTO activity_fetch (date, fetched_at) VALUES (?,?)", [
+            ("2026-10-25", "2026-10-26T07:10:00"),
+            ("2026-10-26", "2026-10-26T07:10:00"),       # same-day fetch: evening not seen
+        ])
+    assert db.fetch_freshness() == {"complete_through": "2026-10-25",
+                                    "last_fetch": "2026-10-26T07:10:00"}
+    with db._conn() as c:
+        c.execute("UPDATE activity_fetch SET fetched_at = '2026-10-27T07:05:00' "
+                  "WHERE date = '2026-10-26'")
+    assert db.fetch_freshness()["complete_through"] == "2026-10-26"
 
 
 def test_weekly_prompt_counts_garmin_strength_when_the_manual_log_is_empty():

@@ -89,6 +89,8 @@
   .tab { font: 600 16px var(--sign); padding: 8px 14px; border: 0; background: none;
          color: var(--muted); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -1px; }
   .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+  .newdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+            background: var(--train); margin-left: 6px; vertical-align: 2px; }
 
   /* Strength regions keep one colour each, in the chart and the stage cards. */
   :root { --legs: var(--train); --upper: var(--rest); --core: var(--easy); }
@@ -126,7 +128,7 @@
 
   <nav class="tabs" role="tablist">
     <button class="tab" role="tab" data-view="today" aria-selected="true">Today</button>
-    <button class="tab" role="tab" data-view="strength" aria-selected="false">Strength</button>
+    <button class="tab" role="tab" data-view="strength" aria-selected="false">Strength<span class="newdot hidden" id="s_dot" title="New strength session from Garmin"></span></button>
   </nav>
 
   <div id="view_today">
@@ -186,7 +188,8 @@
 
   <div id="view_strength" class="hidden">
     <p class="small error" id="s_error"></p>
-    <section style="margin-top:24px">
+    <p class="small" id="s_fresh" style="margin-top:16px"></p>
+    <section style="margin-top:20px">
       <h2>This week</h2>
       <div id="s_week"></div>
       <p class="small" id="s_week_sum"></p>
@@ -285,6 +288,7 @@ function renderJob(job) {
   }
   clearInterval(poll); poll = null;
   if (job.state !== "running") $("gap").classList.add("hidden");
+  if (job.state === "done") afterRun();
   if (job.state === "done" && job.kind === "daily") {
     st.textContent = ""; showCall(job.result.verdict, job.result.message);
     $("run").textContent = "Run again";
@@ -347,7 +351,18 @@ function el(tag, attrs, ...kids) {
 }
 const REGION = { legs: "Legs", upper: "Upper body", core: "Core" };
 
+function day(iso) {
+  return new Date(iso.slice(0, 10) + "T12:00").toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+}
+
 function renderStrength(d) {
+  const f = d.data;
+  // Garmin data only arrives with a run, so say how far it goes.
+  $("s_fresh").textContent = !f.complete_through ? "No Garmin data fetched yet."
+    : f.yesterday_missing
+      ? `Garmin data up to ${day(f.complete_through)}. Yesterday isn't fetched yet: press Get today's call on the Today tab and this page updates.`
+      : `Garmin data up to ${day(f.complete_through)}` + (f.last_fetch ? ` · fetched ${day(f.last_fetch)} ${f.last_fetch.slice(11, 16)}` : "") + ".";
+  $("s_fresh").classList.toggle("error", !!f.yesterday_missing);
   const w = d.week;
   $("s_week").replaceChildren(...(w.slots.length ? w.slots.map((s) => el("div", { class: "row" },
     el("b", {}, s.day), el("span", {}, `Strength ${s.slot || ""}${s.light ? " (light)" : ""}`,
@@ -403,11 +418,29 @@ function renderStrength(d) {
     ...lifts.map(([n, rows]) => el("div", {}, `${n}: ${rows.map((r) => r.replace(/^\d{4}-/, "")).join(" → ")}`))] : []));
 }
 
-let strengthLoaded = false;
+// The dot on the tab: a Garmin strength session newer than the last one shown.
+let strengthLoaded = false, latestStrength = null, view = "today";
+function seenStrength(v) {
+  try { if (v === undefined) return localStorage.getItem("strengthSeen") || ""; localStorage.setItem("strengthSeen", v); }
+  catch (e) { return ""; }
+}
+function markStrength(latest) {
+  latestStrength = latest || null;
+  if (view === "strength" && latestStrength) seenStrength(latestStrength);
+  $("s_dot").classList.toggle("hidden", !latestStrength || latestStrength <= seenStrength());
+}
+async function afterRun() {           // a run fetched Garmin: reload what the tab shows
+  strengthLoaded = false;
+  markStrength((await api("/api/status")).strength_latest);
+  if (view === "strength") showView("strength");
+}
+
 async function showView(name) {
+  view = name;
   document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.view === name)));
   $("view_today").classList.toggle("hidden", name !== "today");
   $("view_strength").classList.toggle("hidden", name !== "strength");
+  if (name === "strength") markStrength(latestStrength);
   if (name === "strength" && !strengthLoaded) {
     const d = await api("/api/strength");
     if (d.error) { $("s_error").textContent = `Couldn't load strength: ${d.error}`; return; }
@@ -441,6 +474,7 @@ async function modelState() {
     $("gap").classList.remove("hidden");
   }
   if (s.today) { showCall(s.today.verdict, s.today.message); $("run").textContent = "Run again"; }
+  markStrength(s.strength_latest);
   if (!s.weekly.done) {
     $("weekly").classList.remove("hidden");
     $("weekly_text").textContent = `${s.weekly.label} hasn't been reviewed yet. Takes a few minutes; it can adjust next week's plan within safe limits.`;
