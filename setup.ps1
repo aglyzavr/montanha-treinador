@@ -30,7 +30,8 @@ Step "1/8  Python 3.12+"
 function Find-Python {
     # The py launcher can exist with no Python behind it, and "python" can be
     # the Microsoft Store stub; only trust a candidate that prints a version.
-    foreach ($cand in @("py -3.13", "py -3.12", "python")) {
+    # Newest first: 3.12 and 3.13 no longer get Windows security builds.
+    foreach ($cand in @("py -3.14", "py -3.13", "py -3.12", "python")) {
         $exe, $arg = $cand.Split(" ", 2)
         if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
         $ver = & $exe $arg -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
@@ -43,8 +44,8 @@ function Find-Python {
 $py = Find-Python
 if (-not $py) {
     Warn "Python 3.12+ not found."
-    if (Ask "Install Python 3.13 with winget now?") {
-        winget install -e --id Python.Python.3.13 --scope user --accept-package-agreements --accept-source-agreements
+    if (Ask "Install Python 3.14 with winget now?") {
+        winget install -e --id Python.Python.3.14 --scope user --accept-package-agreements --accept-source-agreements
         Refresh-Path
         $py = Find-Python
         if (-not $py) {
@@ -53,7 +54,7 @@ if (-not $py) {
             exit 1
         }
     } else {
-        Warn "Install Python 3.13 from python.org (tick 'Add to PATH'), then re-run setup.ps1."
+        Warn "Install Python 3.14 from python.org (tick 'Add to PATH'), then re-run setup.ps1."
         exit 1
     }
 }

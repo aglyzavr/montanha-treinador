@@ -17,6 +17,8 @@ src/prompt.py
 src/readiness.py
 src/runtime.py
 src/store.py
+src/streams.py
+src/strength.py
 src/weekly.py
 src/montanha_coach.egg-info/PKG-INFO
 src/montanha_coach.egg-info/SOURCES.txt

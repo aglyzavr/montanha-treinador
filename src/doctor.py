@@ -33,6 +33,14 @@ def check_python():
             report(FAIL, f"package {mod}", "missing -- run setup.ps1 (pip install -e .)")
             return
     report(OK, "Python packages", "requests, python-dotenv, PyYAML")
+    # Windows has no system time-zone database; without tzdata the configured
+    # timezone silently falls back and Telegram notes can land on the wrong day.
+    try:
+        from zoneinfo import ZoneInfo
+        from .config import CONFIG
+        ZoneInfo(CONFIG.get("timezone", "UTC"))
+    except Exception as e:
+        report(FAIL, "time zone", f"{e} -- run setup.ps1 (pip install -e .)")
 
 
 def check_env(root: Path):

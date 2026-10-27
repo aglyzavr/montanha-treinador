@@ -7,6 +7,8 @@ dependencies = [
     "requests>=2.32",
     "python-dotenv>=1.0",
     "PyYAML>=6.0",
+    # zoneinfo has no time-zone database on Windows without it (inbox dates)
+    "tzdata>=2026.1; sys_platform == 'win32'",
 ]
 
 # Install (from the project root):
